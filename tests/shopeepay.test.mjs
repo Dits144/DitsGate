@@ -57,7 +57,7 @@ test('HTTP check rejects unbound references, including demo-only orders; no tena
       for(const token of users)assert.equal((await req('/api/v1/shopeepay/check','POST',payload,token))[0],409);
       assert.equal((await req('/api/v1/shopeepay/check','POST',{...payload,amount:1.5},users[0]))[0],400);
     } finally {for(const key of Object.keys(env)){if(original[key]===undefined)delete process.env[key];else process.env[key]=original[key]}}
-    assert.equal(db.prepare('SELECT COUNT(*) n FROM ledger_entries').get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM ledger_entries WHERE kind != 'signup_bonus'").get().n,0);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM provider_orders').get().n,0);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM transactions WHERE status=?').get('demo_only').n,1);
   }finally{await new Promise(resolve=>server.close(resolve));db.close()}

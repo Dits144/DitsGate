@@ -55,10 +55,28 @@ function Modal({title,close,children}:{title:string;close:()=>void;children:Reac
  return <div className="overlay" onMouseDown={e=>{if(e.target===e.currentTarget)close()}}><div className="modal" role="dialog" aria-modal="true" aria-label={title} ref={ref}><div className="modal-head"><h2>{title}</h2><button className="icon-btn" aria-label="Tutup" onClick={close}><X size={18}/></button></div>{children}</div></div>;
 }
 
-function CreatePayment({s,set,notify,close}:{s:DemoState;set:Setter;notify:(m:string)=>void;close:()=>void}){
+function CreatePayment({s,set,notify,close,onRefreshBalance}:{s:DemoState;set:Setter;notify:(m:string)=>void;close:()=>void;onRefreshBalance?:()=>void}){
+ const merchant=useMerchantSession();
  const nav=useNavigate();
- const[orderId,order]=useState(''),[amount,amt]=useState(''),[method,met]=useState('QRIS'),[description,desc]=useState(''),[expiration,exp]=useState(30),[customer,cust]=useState(''),[error,err]=useState('');
- return <Modal title="Buat Pembayaran" close={close}><form onSubmit={e=>{e.preventDefault();try{const next=createPayment(s,{orderId,amount:Number(amount),method,description,expiration,customer});set(next);notify('Order pembayaran dibuat');close();nav('/dashboard/transactions')}catch(ex){err((ex as Error).message)}}}><div className="form-grid"><label>Order ID eksternal <input required value={orderId} onChange={e=>order(e.target.value)} placeholder="ORDER-001"/></label><label>Nominal (minimal Rp 1.000) <input required type="number" min="1000" step="1" value={amount} onChange={e=>amt(e.target.value)} placeholder="50000"/></label><label>Metode <select value={method} onChange={e=>met(e.target.value)}><option>QRIS</option><option>Transfer Bank</option></select></label><label>Berlaku selama <select value={expiration} onChange={e=>exp(Number(e.target.value))}><option value={15}>15 menit</option><option value={30}>30 menit</option><option value={60}>60 menit</option><option value={1440}>24 jam</option></select></label><label className="full">Deskripsi (opsional)<input value={description} onChange={e=>desc(e.target.value)} placeholder="Pembelian produk"/></label><label className="full">Referensi pelanggan (opsional)<input value={customer} onChange={e=>cust(e.target.value)} placeholder="CUST-001"/></label></div>{error&&<p className="error" role="alert">{error}</p>}<div className="info-line">Biaya platform Rp 100 dipotong ketika transaksi berhasil dibayar.</div><div className="modal-actions"><button type="button" className="button secondary" onClick={close}>Batal</button><button className="button primary" type="submit">Buat Order</button></div></form></Modal>;
+ const[orderId,order]=useState(''),[amount,amt]=useState(''),[method,met]=useState('QRIS'),[description,desc]=useState(''),[expiration,exp]=useState(30),[customer,cust]=useState(''),[busy,setBusy]=useState(false),[error,err]=useState('');
+ const submit=async(e:React.FormEvent)=>{
+  e.preventDefault();err('');
+  if(merchant?.token){
+   setBusy(true);
+   try{
+    const headers:Record<string,string>={'Content-Type':'application/json',...(merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{})};
+    const r=await fetch(API_ORIGIN+'/api/v1/transactions',{method:'POST',credentials:'include',headers,body:JSON.stringify({order_id:orderId.trim(),amount:Number(amount),expirationMinutes:expiration})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(j.error||'Gagal membuat order');
+    onRefreshBalance?.();
+    notify('Order dibuat · Rp 100 biaya ditahan');
+    close();nav('/dashboard/transactions');
+   }catch(ex){err((ex as Error).message)}finally{setBusy(false)}
+   return;
+  }
+  try{const next=createPayment(s,{orderId,amount:Number(amount),method,description,expiration,customer});set(next);notify('Order pembayaran dibuat');close();nav('/dashboard/transactions')}catch(ex){err((ex as Error).message)}
+ };
+ return <Modal title="Buat Pembayaran" close={close}><form onSubmit={submit}><div className="form-grid"><label>Order ID eksternal <input required value={orderId} onChange={e=>order(e.target.value)} placeholder="ORDER-001"/></label><label>Nominal (minimal Rp 1.000) <input required type="number" min="1000" step="1" value={amount} onChange={e=>amt(e.target.value)} placeholder="50000"/></label><label>Metode <select value={method} onChange={e=>met(e.target.value)}><option>QRIS</option><option>Transfer Bank</option></select></label><label>Berlaku selama <select value={expiration} onChange={e=>exp(Number(e.target.value))}><option value={15}>15 menit</option><option value={30}>30 menit</option><option value={60}>60 menit</option><option value={1440}>24 jam</option></select></label><label className="full">Deskripsi (opsional)<input value={description} onChange={e=>desc(e.target.value)} placeholder="Pembelian produk"/></label><label className="full">Referensi pelanggan (opsional)<input value={customer} onChange={e=>cust(e.target.value)} placeholder="CUST-001"/></label></div>{error&&<p className="error" role="alert">{error}</p>}<div className="info-line">Biaya platform Rp 100 ditahan saat transaksi dibuat; dikembalikan otomatis jika gagal/batal/kedaluwarsa.</div><div className="modal-actions"><button type="button" className="button secondary" onClick={close}>Batal</button><button className="button primary" type="submit" disabled={busy}>{busy?'Memproses...':'Buat Order'}</button></div></form></Modal>;
 }
 
 type NavItem=[string,string,typeof LayoutDashboard];
@@ -73,12 +91,18 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
  const merchant=useMerchantSession();
  const[portalBroken,setPortalBroken]=useState(false);
  const[serverBalance,setServerBalance]=useState<number|null>(null);
+ const[heldBalance,setHeldBalance]=useState<number>(0);
+ const refreshBalance=React.useCallback(()=>{
+  if(!merchant?.token){setServerBalance(null);setHeldBalance(0);return;}
+  const headers:Record<string,string>=merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{};
+  fetch(API_ORIGIN+'/api/v1/balance',{credentials:'include',headers}).then(r=>r.ok?r.json():null).then(d=>{if(typeof d?.balance==='number')setServerBalance(d.balance);if(typeof d?.heldBalance==='number')setHeldBalance(d.heldBalance)}).catch(()=>{});
+ },[merchant?.token]);
  useEffect(()=>{
-  if(!merchant?.token){setPortalBroken(false);setServerBalance(null);return;}
+  if(!merchant?.token){setPortalBroken(false);setServerBalance(null);setHeldBalance(0);return;}
   let cancelled=false;
   const headers:Record<string,string>=merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{};
   fetch(API_ORIGIN+'/api/v1/shopee-portal',{credentials:'include',headers}).then(r=>r.ok?r.json():null).then(d=>{if(!cancelled)setPortalBroken(d?.data?.status==='session_broken')}).catch(()=>{});
-  fetch(API_ORIGIN+'/api/v1/balance',{credentials:'include',headers}).then(r=>r.ok?r.json():null).then(d=>{if(!cancelled&&typeof d?.balance==='number')setServerBalance(d.balance)}).catch(()=>{});
+  fetch(API_ORIGIN+'/api/v1/balance',{credentials:'include',headers}).then(r=>r.ok?r.json():null).then(d=>{if(!cancelled&&typeof d?.balance==='number'){setServerBalance(d.balance);if(typeof d?.heldBalance==='number')setHeldBalance(d.heldBalance)}}).catch(()=>{});
   return()=>{cancelled=true};
  },[merchant?.token]);
 
@@ -100,7 +124,7 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
   <aside className={'sidebar '+(mobile?'mobile-open':'')}>
    <div className="brand"><Link to="/dashboard" className="brand-mark">D</Link><div className="brand-text"><strong>DitsGate</strong><small>Payment infrastructure</small></div><button aria-label="Tutup menu" className="icon-btn mobile-close" onClick={()=>setMobile(false)}><X size={18}/></button></div>
    <div className="sidebar-scroll">
-    <div className="balance"><div className="balance-title">Saldo biaya <Wallet size={15}/></div><strong>{idr(balanceShown)}</strong><Link to="/dashboard/topup" className="button secondary balance-btn"><Plus size={14}/> Top Up</Link></div>
+    <div className="balance"><div className="balance-title">Saldo biaya <Wallet size={15}/></div><strong>{idr(balanceShown)}</strong>{heldBalance>0&&<small style={{display:'block',color:'var(--muted)',marginBottom:6}}>Ditahan: {idr(heldBalance)}</small>}<Link to="/dashboard/topup" className="button secondary balance-btn"><Plus size={14}/> Top Up</Link></div>
     {visibleSections.map(group=><nav key={group.label} aria-label={group.label} className="nav-group"><div className="nav-title">{group.label}</div>{group.items.map(([path,label,Icon])=><NavLink key={path} to={path} end={path==='/dashboard'} className={({isActive})=>'nav-link '+(isActive?'active':'')} title={label}><Icon size={17}/><span>{label}</span></NavLink>)}</nav>)}
    </div>
    <div className="sidebar-foot"><Link to="/" className="nav-link" title="Beranda publik"><ExternalLink size={17}/><span>Beranda publik</span></Link><button className="nav-link collapse-btn" onClick={()=>setCollapsed(v=>!v)} aria-label={collapsed?'Perluas sidebar':'Ciutkan sidebar'}>{collapsed?<PanelLeftOpen size={17}/>:<PanelLeftClose size={17}/>}<span>Ciutkan sidebar</span></button></div>
@@ -132,7 +156,7 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
      <Route path="integration-guide" element={<GuidePage notify={p.notify}/>}/>
      <Route path="detectors" element={<Detectors {...p}/>}/>
      <Route path="detectors/:id" element={<DetectorRoute/>}/>
-     <Route path="transactions" element={<Transactions {...p} open={()=>setCreate(true)}/>}/>
+     <Route path="transactions" element={<Transactions {...p} onRefreshBalance={refreshBalance} open={()=>setCreate(true)}/>}/>
      <Route path="mutations" element={<Mutations {...p}/>}/>
      <Route path="support" element={<TicketList notify={p.notify}/>}/>
      <Route path="support/new" element={<NewTicket notify={p.notify}/>}/>
@@ -153,7 +177,7 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
    <NavLink to="/dashboard/transactions"><ReceiptText size={19}/>Transaksi</NavLink>
    <button onClick={()=>setMobile(true)}><Menu size={19}/>Menu</button>
   </nav>
-  {create&&<CreatePayment {...p} close={()=>setCreate(false)}/>}
+  {create&&<CreatePayment {...p} onRefreshBalance={refreshBalance} close={()=>setCreate(false)}/>}
  </div>;
 }
 
@@ -161,7 +185,7 @@ function Overview(p:Props&{open:()=>void;serverBalance:number|null}){
  const merchant=useMerchantSession();
  const[period,setPeriod]=useState(7);
  const[serverTx,setServerTx]=useState<PaymentTransaction[]|null>(null);
- const[serverLedger,setServerLedger]=useState<Array<{id:string;kind:string;amount:number;createdAt:string;sourceId:string}>|null>(null);
+ const[serverLedger,setServerLedger]=useState<Array<{id:string;kind:string;amount:number;note?:string|null;createdAt:string;sourceId:string}>|null>(null);
  const[hasQris,setHasQris]=useState(false);
  const[hasDetector,setHasDetector]=useState(false);
  const[hasKey,setHasKey]=useState(false);
@@ -225,15 +249,15 @@ function Overview(p:Props&{open:()=>void;serverBalance:number|null}){
    </section>
   </div>
   <section className="card">
-   <div className="section-head"><div><h2>Riwayat saldo biaya</h2><p>Terpisah dari dana pembayaran pelanggan · biaya Rp 100 per order lunas</p></div></div>
+   <div className="section-head"><div><h2>Riwayat saldo biaya</h2><p>Saldo awal pendaftar baru Rp 3.000 · biaya Rp 100 ditahan saat transaksi dibuat &amp; dikembalikan jika gagal</p></div></div>
    {(serverLedger??p.s.ledger).length?<div className="table-wrap"><table><thead><tr><th>Peristiwa</th><th>Deskripsi</th><th>Waktu</th><th>Perubahan</th></tr></thead><tbody>
-    {serverLedger?serverLedger.map(x=><tr key={x.id}><td>{x.kind.replaceAll('_',' ')}</td><td>Ref: {x.sourceId.slice(0,12)}</td><td>{date(x.createdAt)}</td><td className={x.amount>0?'positive':''}>{x.amount>0?'+':''}{idr(x.amount)}</td></tr>):p.s.ledger.map(x=><tr key={x.id}><td>{x.type.replaceAll('_',' ')}</td><td>{x.description}</td><td>{date(x.timestamp)}</td><td className={x.amount>0?'positive':''}>{x.amount>0?'+':''}{idr(x.amount)}</td></tr>)}
+    {serverLedger?serverLedger.map(x=>{const label=({signup_bonus:'Bonus Pendaftaran',admin_topup:'Topup Admin',admin_adjustment:'Penyesuaian Admin',tx_hold:'Biaya Ditahan',tx_refund:'Pengembalian Biaya',paid_order_fee:'Biaya Order Lunas'}[x.kind]??x.kind.replaceAll('_',' '));return <tr key={x.id}><td>{label}</td><td>{x.note||`Ref: ${x.sourceId.slice(0,12)}`}</td><td>{date(x.createdAt)}</td><td className={x.amount>0?'positive':''}>{x.amount>0?'+':''}{idr(x.amount)}</td></tr>}):p.s.ledger.map(x=><tr key={x.id}><td>{x.type.replaceAll('_',' ')}</td><td>{x.description}</td><td>{date(x.timestamp)}</td><td className={x.amount>0?'positive':''}>{x.amount>0?'+':''}{idr(x.amount)}</td></tr>)}
    </tbody></table></div>:<Empty title="Belum ada mutasi saldo biaya" desc="Riwayat topup dan pemotongan biaya transaksi akan muncul di sini."/>}
   </section>
  </>;
 }
 
-function Transactions(p:Props&{open?:()=>void}){
+function Transactions(p:Props&{open?:()=>void;onRefreshBalance?:()=>void}){
  const merchant=useMerchantSession();
  const[serverRows,setServerRows]=useState<PaymentTransaction[]|null>(null);
  const[search,setSearch]=useState(''),[status,setStatus]=useState('all'),[method,setMethod]=useState('all'),[range,setRange]=useState('all'),[sort,setSort]=useState('new'),[page,setPage]=useState(1),[selected,setSelected]=useState<PaymentTransaction|null>(null);
@@ -245,9 +269,18 @@ function Transactions(p:Props&{open?:()=>void}){
    if(!res.ok)return;
    const json=await res.json() as {data?:Array<{id:string;orderId:string;amount:number;uniqueCode:number;status:string;createdAt:string;expiresAt:string}>};
    if(Array.isArray(json.data)){
-    setServerRows(json.data.map(r=>({id:r.id,orderId:r.orderId,amount:r.amount,uniqueCode:r.uniqueCode,method:'QRIS',status:(r.status==='paid'||r.status==='pending'||r.status==='expired'||r.status==='failed'?r.status:'pending'),createdAt:r.createdAt,expiresAt:r.expiresAt,description:'',customer:''})));
+    setServerRows(json.data.map(r=>({id:r.id,orderId:r.orderId,amount:r.amount,uniqueCode:r.uniqueCode,method:'QRIS',status:(r.status==='paid'||r.status==='pending'||r.status==='expired'||r.status==='failed'||r.status==='cancelled'?r.status:'pending'),createdAt:r.createdAt,expiresAt:r.expiresAt,description:'',customer:''})));
    }
   }catch{}
+ };
+ const cancelTx=async(id:string)=>{
+  if(!merchant?.token)return;
+  try{
+   const headers:Record<string,string>={'Content-Type':'application/json',...(merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{})};
+   const res=await fetch(API_ORIGIN+'/api/v1/transactions/'+id,{method:'PATCH',credentials:'include',headers,body:JSON.stringify({status:'cancelled'})});
+   if(res.ok){p.notify('Transaksi dibatalkan · Rp 100 dikembalikan ke saldo');await loadServer();p.onRefreshBalance?.();}
+   else{const j=await res.json().catch(()=>({}));p.notify(j.error||'Gagal membatalkan transaksi');}
+  }catch{p.notify('Kesalahan jaringan');}
  };
  useEffect(()=>{void loadServer();},[merchant?.token]);
  const sourceRows=serverRows??p.s.transactions;
@@ -261,7 +294,7 @@ function Transactions(p:Props&{open?:()=>void}){
   <button type="button" className={'button '+(status==='all'?'primary':'secondary')} onClick={()=>setStatus('all')}><small>ALL</small><b>{sourceRows.length} transaksi</b></button>
   {(['pending','paid','expired'] as const).map(st=>{const list=sumOf(st);return <button type="button" key={st} className={'button '+(status===st?'primary':'secondary')} onClick={()=>setStatus(st)}><small>{st.toUpperCase()}</small><b>{list.length} · {idr(totalAmount(list))}</b></button>})}
  </div>
- <section className="card table-card"><div className="filters"><label className="search-field"><Search size={16}/><input aria-label="Cari ID transaksi atau order" placeholder="Cari ID transaksi / order..." value={search} onChange={e=>setSearch(e.target.value)}/></label><select aria-label="Filter metode" value={method} onChange={e=>setMethod(e.target.value)}><option value="all">Semua metode</option><option>QRIS</option><option>Transfer Bank</option></select><select aria-label="Filter tanggal" value={range} onChange={e=>setRange(e.target.value)}><option value="all">Semua tanggal</option><option value="7">7 hari</option><option value="30">30 hari</option><option value="90">90 hari</option></select><select aria-label="Urutkan" value={sort} onChange={e=>setSort(e.target.value)}><option value="new">Terbaru</option><option value="old">Terlama</option><option value="amount">Nominal tertinggi</option></select></div>{rows.length?<><div className="table-wrap"><table><thead><tr><th>ID Transaksi / Order ID</th><th>Nominal Pokok</th><th>Kode Unik</th><th>Total Bayar</th><th>Status</th><th>Waktu</th><th>Detail &amp; notifikasi</th></tr></thead><tbody>{rows.slice((page-1)*8,page*8).map(t=><tr key={t.id}><td><b>{t.id}</b><small>Order: {t.orderId}</small></td><td>{idr(t.amount)}</td><td>+{t.uniqueCode}</td><td><b>{idr(t.amount+t.uniqueCode)}</b></td><td><Badge tone={t.status==='paid'?'green':t.status==='pending'?'amber':'muted'}>{t.status.toUpperCase()}</Badge></td><td>{date(t.createdAt)}</td><td className="table-actions"><button className="button secondary" onClick={()=>setSelected(t)}>Inspeksi</button><button className="icon-btn" aria-label={'Salin '+t.id} title="Salin ID" onClick={()=>copy(t.id,p.notify)}><Copy size={16}/></button></td></tr>)}</tbody></table></div><div className="pagination"><span>{rows.length} hasil · Halaman {page} dari {pages}</span><button className="button secondary" disabled={page<=1} onClick={()=>setPage(page-1)}>Sebelumnya</button><button className="button secondary" disabled={page>=pages} onClick={()=>setPage(page+1)}>Berikutnya</button></div></>:<Empty title="Tidak ada transaksi" desc={sourceRows.length?'Coba ubah filter pencarian.':'Transaksi akan muncul saat order dibuat melalui API merchant.'}/>}</section>{selected&&<Modal title="Inspeksi transaksi" close={()=>setSelected(null)}><div className="detail-grid">{[['ID transaksi',selected.id],['Order ID',selected.orderId],['Merchant',merchant?.user.name||p.s.merchant.name],['Nominal pokok',idr(selected.amount)],['Kode unik','+'+String(selected.uniqueCode)],['Total bayar',idr(selected.amount+selected.uniqueCode)],['Metode',selected.method],['Status',statusText[selected.status]],['Dibuat',date(selected.createdAt)],['Kedaluwarsa',date(selected.expiresAt)],['Deskripsi',selected.description||'—'],['Referensi pelanggan',selected.customer||'—']].map(([a,b])=><div key={a}><small>{a}</small><b>{b}</b></div>)}</div><div className="row-actions"><Link className="button primary" to={'/pay/'+selected.id}>Buka checkout <ExternalLink size={14}/></Link><button className="button secondary" onClick={()=>copy(location.origin+'/pay/'+selected.id,p.notify)}><Copy size={14}/> Salin URL</button><Link className="button secondary" to="/dashboard/support/new">Laporkan Kendala</Link></div></Modal>}</>;
+ <section className="card table-card"><div className="filters"><label className="search-field"><Search size={16}/><input aria-label="Cari ID transaksi atau order" placeholder="Cari ID transaksi / order..." value={search} onChange={e=>setSearch(e.target.value)}/></label><select aria-label="Filter metode" value={method} onChange={e=>setMethod(e.target.value)}><option value="all">Semua metode</option><option>QRIS</option><option>Transfer Bank</option></select><select aria-label="Filter tanggal" value={range} onChange={e=>setRange(e.target.value)}><option value="all">Semua tanggal</option><option value="7">7 hari</option><option value="30">30 hari</option><option value="90">90 hari</option></select><select aria-label="Urutkan" value={sort} onChange={e=>setSort(e.target.value)}><option value="new">Terbaru</option><option value="old">Terlama</option><option value="amount">Nominal tertinggi</option></select></div>{rows.length?<><div className="table-wrap"><table><thead><tr><th>ID Transaksi / Order ID</th><th>Nominal Pokok</th><th>Kode Unik</th><th>Total Bayar</th><th>Status</th><th>Waktu</th><th>Detail &amp; notifikasi</th></tr></thead><tbody>{rows.slice((page-1)*8,page*8).map(t=><tr key={t.id}><td><b>{t.id}</b><small>Order: {t.orderId}</small></td><td>{idr(t.amount)}</td><td>+{t.uniqueCode}</td><td><b>{idr(t.amount+t.uniqueCode)}</b></td><td><Badge tone={t.status==='paid'?'green':t.status==='pending'?'amber':'muted'}>{t.status.toUpperCase()}</Badge></td><td>{date(t.createdAt)}</td><td className="table-actions"><button className="button secondary" onClick={()=>setSelected(t)}>Inspeksi</button>{merchant?.token&&t.status==='pending'&&<button className="button secondary" onClick={()=>void cancelTx(t.id)}>Batalkan</button>}<button className="icon-btn" aria-label={'Salin '+t.id} title="Salin ID" onClick={()=>copy(t.id,p.notify)}><Copy size={16}/></button></td></tr>)}</tbody></table></div><div className="pagination"><span>{rows.length} hasil · Halaman {page} dari {pages}</span><button className="button secondary" disabled={page<=1} onClick={()=>setPage(page-1)}>Sebelumnya</button><button className="button secondary" disabled={page>=pages} onClick={()=>setPage(page+1)}>Berikutnya</button></div></>:<Empty title="Tidak ada transaksi" desc={sourceRows.length?'Coba ubah filter pencarian.':'Transaksi akan muncul saat order dibuat melalui API merchant.'}/>}</section>{selected&&<Modal title="Inspeksi transaksi" close={()=>setSelected(null)}><div className="detail-grid">{[['ID transaksi',selected.id],['Order ID',selected.orderId],['Merchant',merchant?.user.name||p.s.merchant.name],['Nominal pokok',idr(selected.amount)],['Kode unik','+'+String(selected.uniqueCode)],['Total bayar',idr(selected.amount+selected.uniqueCode)],['Metode',selected.method],['Status',statusText[selected.status]],['Dibuat',date(selected.createdAt)],['Kedaluwarsa',date(selected.expiresAt)],['Deskripsi',selected.description||'—'],['Referensi pelanggan',selected.customer||'—']].map(([a,b])=><div key={a}><small>{a}</small><b>{b}</b></div>)}</div><div className="row-actions"><Link className="button primary" to={'/pay/'+selected.id}>Buka checkout <ExternalLink size={14}/></Link><button className="button secondary" onClick={()=>copy(location.origin+'/pay/'+selected.id,p.notify)}><Copy size={14}/> Salin URL</button><Link className="button secondary" to="/dashboard/support/new">Laporkan Kendala</Link></div></Modal>}</>;
 }
 
 function Detectors(p:Props){
@@ -419,7 +452,7 @@ function Auth({mode,notify}:{mode:'login'|'register'|'forgot';notify:(m:string)=
    setPassword('');notify('Berhasil masuk ke akun merchant.');nav('/dashboard');
   }catch(cause){setError(cause instanceof Error?cause.message:'Autentikasi gagal.')}finally{setPassword('');setBusy(false)}
  }
- return <div className="auth-page"><Link className="back-link" to="/">← Kembali ke Beranda</Link><div className="auth-layout"><div className="auth-form"><div className="brand auth-brand"><span className="brand-mark">D</span><div className="brand-text"><strong>DitsGate</strong><small>Payment infrastructure</small></div></div><Badge tone="blue">AKUN MERCHANT</Badge><h1>{mode==='login'?'Masuk ke Dashboard':mode==='register'?'Buat Akun Merchant':'Atur Ulang Kata Sandi'}</h1><p>{mode==='forgot'?'Hubungi dukungan untuk pemulihan akses akun.':mode==='register'?'Buat akun merchant untuk mulai menerima pembayaran QRIS otomatis.':'Masuk ke dashboard merchant DitsGate Anda.'}</p><form onSubmit={submit} className="stack">{mode==='register'&&<label>Nama bisnis<input required minLength={2} maxLength={100} value={name} onChange={e=>setName(e.target.value)} placeholder="Nama bisnis"/></label>}<label>Email<input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="nama@bisnis.com" autoComplete="email"/></label>{mode!=='forgot'&&<label>Kata sandi<div className="password-wrap"><input type={show?'text':'password'} minLength={mode==='register'?12:1} required value={password} onChange={e=>setPassword(e.target.value)} placeholder={mode==='register'?'Minimal 12 karakter':'Kata sandi'} autoComplete={mode==='register'?'new-password':'current-password'}/><button type="button" aria-label={show?'Sembunyikan kata sandi':'Tampilkan kata sandi'} onClick={()=>setShow(v=>!v)}><Eye size={17}/></button></div></label>}{mode==='login'&&<Link className="small-link" to="/forgot-password">Lupa kata sandi?</Link>}{error&&<p role="alert" className="error">{error}</p>}<button className="button primary full-width" disabled={busy||mode==='forgot'}>{busy?'Memproses...':mode==='register'?'Daftar dan Masuk':'Masuk'}</button></form><p className="auth-switch">{mode==='login'?<>Belum punya akun? <Link to="/register">Daftar</Link></>:<>Sudah punya akun? <Link to="/login">Masuk</Link></>}</p></div><div className="auth-aside"><span className="eyebrow">DITSGATE PAYMENT INFRASTRUCTURE</span><h2>Kelola pembayaran QRIS secara otomatis.</h2><p>Hubungkan QRIS toko Anda, aktifkan detektor mutasi, dan terima notifikasi webhook real-time ke sistem Anda.</p><div className="aside-preview"><div className="fake-row"><span>Status Layanan</span><Badge tone="green">AKTIF</Badge></div><div className="fake-grid"><div>REST API<strong>v1</strong></div><div>Webhook<strong>HMAC-SHA256</strong></div></div></div></div></div></div>;
+ return <div className="auth-page"><Link className="back-link" to="/">← Kembali ke Beranda</Link><div className="auth-layout"><div className="auth-form"><div className="brand auth-brand"><span className="brand-mark">D</span><div className="brand-text"><strong>DitsGate</strong><small>Payment infrastructure</small></div></div><Badge tone="blue">AKUN MERCHANT</Badge><h1>{mode==='login'?'Masuk ke Dashboard':mode==='register'?'Buat Akun Merchant':'Atur Ulang Kata Sandi'}</h1><p>{mode==='forgot'?'Hubungi dukungan untuk pemulihan akses akun.':mode==='register'?'Buat akun merchant dan langsung dapatkan saldo awal Rp 3.000 gratis.':'Masuk ke dashboard merchant DitsGate Anda.'}</p><form onSubmit={submit} className="stack">{mode==='register'&&<label>Nama bisnis<input required minLength={2} maxLength={100} value={name} onChange={e=>setName(e.target.value)} placeholder="Nama bisnis"/></label>}<label>Email<input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="nama@bisnis.com" autoComplete="email"/></label>{mode!=='forgot'&&<label>Kata sandi<div className="password-wrap"><input type={show?'text':'password'} minLength={mode==='register'?12:1} required value={password} onChange={e=>setPassword(e.target.value)} placeholder={mode==='register'?'Minimal 12 karakter':'Kata sandi'} autoComplete={mode==='register'?'new-password':'current-password'}/><button type="button" aria-label={show?'Sembunyikan kata sandi':'Tampilkan kata sandi'} onClick={()=>setShow(v=>!v)}><Eye size={17}/></button></div></label>}{mode==='login'&&<Link className="small-link" to="/forgot-password">Lupa kata sandi?</Link>}{error&&<p role="alert" className="error">{error}</p>}<button className="button primary full-width" disabled={busy||mode==='forgot'}>{busy?'Memproses...':mode==='register'?'Daftar dan Masuk':'Masuk'}</button></form><p className="auth-switch">{mode==='login'?<>Belum punya akun? <Link to="/register">Daftar</Link></>:<>Sudah punya akun? <Link to="/login">Masuk</Link></>}</p></div><div className="auth-aside"><span className="eyebrow">DITSGATE PAYMENT INFRASTRUCTURE</span><h2>Kelola pembayaran QRIS secara otomatis.</h2><p>Hubungkan QRIS toko Anda, aktifkan detektor mutasi, dan terima notifikasi webhook real-time ke sistem Anda.</p><div className="aside-preview"><div className="fake-row"><span>Status Layanan</span><Badge tone="green">AKTIF</Badge></div><div className="fake-grid"><div>REST API<strong>v1</strong></div><div>Webhook<strong>HMAC-SHA256</strong></div></div></div></div></div></div>;
 }
 
 function PublicDocs({kind,notify}:{kind:'docs'|'integrations';notify:(m:string)=>void}){

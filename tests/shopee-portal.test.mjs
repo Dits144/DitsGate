@@ -81,7 +81,7 @@ test('connect probes fixed Shopee HTTPS endpoints and stores encrypted token onl
   assert.equal(feedStatus,200);assert.equal(result.data.length,1);assert.equal(result.data[0].id,'tx-1');assert.equal(result.data[0].amountIdr,409662);assert.equal(result.data[0].paymentVerified,false);
   assert.equal((await x.request('/api/v1/shopee-portal/transactions','GET',undefined,b))[0],404);
   assert.equal((await x.request('/api/v1/shopee-portal','GET',undefined,a))[1].data.token,undefined);
-  assert.equal(x.db.prepare('SELECT COUNT(*) AS n FROM ledger_entries').get().n,0);
+  assert.equal(x.db.prepare("SELECT COUNT(*) AS n FROM ledger_entries WHERE kind != 'signup_bonus'").get().n,0);
   assert.equal((await x.request('/api/v1/shopee-portal','DELETE',undefined,b))[0],404);
   assert.equal((await x.request('/api/v1/shopee-portal','DELETE',undefined,a))[0],200);
   assert.equal(x.db.prepare('SELECT COUNT(*) AS n FROM shopee_portal_connections').get().n,0);
@@ -131,7 +131,7 @@ test('feed refuses cross-scope rows and does not write ledger',async()=>{
   cross=true;
   const [status,result]=await x.request('/api/v1/shopee-portal/transactions','GET',undefined,a);
   assert.equal(status,200);assert.deepEqual(result.data,[]);
-  assert.equal(x.db.prepare('SELECT COUNT(*) AS n FROM ledger_entries').get().n,0);
+  assert.equal(x.db.prepare("SELECT COUNT(*) AS n FROM ledger_entries WHERE kind != 'signup_bonus'").get().n,0);
  }finally{await x.close()}
 });
 
@@ -145,7 +145,7 @@ test('damaged encrypted token fails closed and requires reconnect',async()=>{
   assert.equal(status,500);
   assert.ok(!JSON.stringify(body).includes(secret));
   assert.equal((await x.request('/api/v1/shopee-portal','GET',undefined,a))[1].data.status,'session_broken');
-  assert.equal(x.db.prepare('SELECT COUNT(*) AS n FROM ledger_entries').get().n,0);
+  assert.equal(x.db.prepare("SELECT COUNT(*) AS n FROM ledger_entries WHERE kind != 'signup_bonus'").get().n,0);
  }finally{await x.close()}
 });
 

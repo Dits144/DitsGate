@@ -99,7 +99,7 @@ test('merchant keys and webhook settings are isolated, one-time secrets; keys on
   assert.equal(db.prepare('SELECT name FROM merchant_api_keys WHERE id=?').get(id).name,'Updated POS');
   assert.equal((await req('/api/v1/transactions','GET',undefined,key))[0],401);
   assert.ok((await req('/api/v1/api-keys','GET',undefined,token))[1].data.find(x=>x.id===id).revokedAt);
-  assert.equal((await req('/api/v1/transactions','GET',undefined,token))[1].data[0].status,'demo_only');
+  assert.equal((await req('/api/v1/transactions','GET',undefined,token))[1].data[0].status,'pending');
   assert.equal(db.prepare('SELECT user_id FROM merchant_api_keys WHERE id=?').get(id).user_id,a);
  } finally {await new Promise(resolve=>server.close(resolve));db.close()}
 });

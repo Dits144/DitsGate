@@ -14,13 +14,16 @@ test('local API: auth, ownership, default bank/QRIS, transaction, and invalid CR
   assert.equal((await request('/api/auth/register','POST',{email:'b@test.example',password:'12-character-password',name:'Merchant B'}))[0],201);
   token=(await request('/api/auth/login','POST',{email:'a@test.example',password:'12-character-password'}))[1].token;
   other=(await request('/api/auth/login','POST',{email:'b@test.example',password:'12-character-password'}))[1].token;
+  assert.equal((await request('/api/v1/balance'))[1].balance,3000);
   const bank=(await request('/api/v1/bank-accounts','POST',{bank:'BCA',holder:'Demo',number:'123456789'}))[1].data;
   assert.equal(bank.numberMasked,'•••• 6789');assert.equal(bank.isDefault,true);
   assert.equal((await request('/api/v1/bank-accounts/'+bank.id,'PATCH',{holder:'Hacker'},other))[0],404);
   assert.equal((await request('/api/v1/bank-accounts','GET',undefined,other))[1].data.length,0);
   const invalid=await request('/api/v1/qris','POST',{payload:sample.slice(0,-1)+'0',mode:'dynamic',name:'X',city:'BOGOR'});assert.equal(invalid[0],400);
   const asset=(await request('/api/v1/qris','POST',{payload:sample,mode:'dynamic',name:'DitsStore',city:'BOGOR'}))[1].data;assert.equal(asset.isDefault,true);
-  const transaction=await request('/api/v1/transactions','POST',{order_id:'order-1',amount:50000});assert.equal(transaction[0],201);assert.equal(transaction[1].data.qrisId,asset.id);assert.equal(transaction[1].data.status,'demo_only');assert.equal(transaction[1].data.uniqueCode,0);
+  const transaction=await request('/api/v1/transactions','POST',{order_id:'order-1',amount:50000});assert.equal(transaction[0],201);assert.equal(transaction[1].data.qrisId,asset.id);assert.equal(transaction[1].data.status,'pending');assert.equal(transaction[1].data.uniqueCode,0);assert.equal(transaction[1].balance,2900);assert.equal(transaction[1].heldBalance,100);
+  const cancelled=await request('/api/v1/transactions/'+transaction[1].data.id,'PATCH',{status:'cancelled'});assert.equal(cancelled[0],200);assert.equal(cancelled[1].data.status,'cancelled');assert.equal(cancelled[1].balance,3000);assert.equal(cancelled[1].heldBalance,0);
+  assert.equal((await request('/api/v1/transactions/'+transaction[1].data.id,'PATCH',{status:'cancelled'}))[0],409);
   assert.equal((await request('/api/v1/transactions','POST',{order_id:'order-1',amount:50000}))[0],409);
   assert.equal((await request('/api/v1/transactions','POST',{order_id:'other-1',amount:50000,qris_id:asset.id},other))[0],400);
   assert.equal((await request('/api/v1/qris/'+asset.id,'DELETE'))[0],409);

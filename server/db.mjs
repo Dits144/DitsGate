@@ -1,6 +1,10 @@
 ﻿import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+
+export const SIGNUP_BONUS = 3000;
+export const TX_FEE = 100;
 
 export function openDatabase(file) {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -58,8 +62,9 @@ export function openDatabase(file) {
    CREATE TABLE IF NOT EXISTS ledger_entries (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
       amount INTEGER NOT NULL CHECK(amount != 0),
-      kind TEXT NOT NULL CHECK(kind IN ('admin_topup','paid_order_fee')),
+      kind TEXT NOT NULL CHECK(kind IN ('signup_bonus','admin_topup','admin_adjustment','tx_hold','tx_refund','paid_order_fee')),
       source_id TEXT NOT NULL, actor_id TEXT REFERENCES users(id),
+      note TEXT,
       created_at TEXT NOT NULL,
       UNIQUE(kind,source_id));
    CREATE INDEX IF NOT EXISTS ledger_owner ON ledger_entries(user_id,created_at,id);
@@ -128,7 +133,32 @@ export function openDatabase(file) {
   `);
   if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'subscription_expires_at')) {
     db.exec('ALTER TABLE users ADD COLUMN subscription_expires_at TEXT');
-  }  const portalCols = db.prepare('PRAGMA table_info(shopee_portal_connections)').all().map(c => c.name);
+  }
+  if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'is_active')) {
+    db.exec('ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1');
+  }
+  const ledgerSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='ledger_entries'").get()?.sql ?? '';
+  if (!ledgerSchema.includes("'signup_bonus'")) {
+    const ledgerCols = db.prepare('PRAGMA table_info(ledger_entries)').all().map(c => c.name);
+    db.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE ledger_entries RENAME TO ledger_entries_legacy;
+      CREATE TABLE ledger_entries (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+        amount INTEGER NOT NULL CHECK(amount != 0),
+        kind TEXT NOT NULL CHECK(kind IN ('signup_bonus','admin_topup','admin_adjustment','tx_hold','tx_refund','paid_order_fee')),
+        source_id TEXT NOT NULL, actor_id TEXT REFERENCES users(id),
+        note TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(kind,source_id));
+      INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at)
+      SELECT id,user_id,amount,kind,source_id,actor_id,${ledgerCols.includes('note') ? 'note' : 'NULL'},created_at FROM ledger_entries_legacy;
+      DROP TABLE ledger_entries_legacy;
+      CREATE INDEX IF NOT EXISTS ledger_owner ON ledger_entries(user_id,created_at,id);
+      COMMIT;`);
+  } else if (!db.prepare('PRAGMA table_info(ledger_entries)').all().some(c => c.name === 'note')) {
+    db.exec('ALTER TABLE ledger_entries ADD COLUMN note TEXT');
+  }
+  const portalCols = db.prepare('PRAGMA table_info(shopee_portal_connections)').all().map(c => c.name);
   const portalSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='shopee_portal_connections'").get()?.sql ?? '';
   if (portalSchema.includes("'disconnected'")) {
     // SQLite cannot alter a CHECK constraint. Preserve encrypted rows while upgrading the legacy table.
@@ -167,5 +197,42 @@ export function openDatabase(file) {
 
 export function balanceOf(db, userId) {
   return db.prepare('SELECT COALESCE(SUM(amount),0) AS balance FROM ledger_entries WHERE user_id=?').get(userId).balance;
+}
+
+export function heldBalanceOf(db, userId) {
+  return db.prepare("SELECT COALESCE(COUNT(*),0) * ? AS held FROM transactions t WHERE t.user_id=? AND t.status='pending' AND EXISTS (SELECT 1 FROM ledger_entries l WHERE l.kind='tx_hold' AND l.source_id=t.id)").get(TX_FEE, userId).held;
+}
+
+export function settleTxInTx(db, tx, nextStatus, actorId = null, customNote = '') {
+  if (!tx || tx.status !== 'pending') return false;
+  if (!['paid', 'failed', 'expired', 'cancelled'].includes(nextStatus)) {
+    throw new Error('Invalid transaction settlement status.');
+  }
+  const updated = db.prepare("UPDATE transactions SET status=? WHERE id=? AND status='pending'").run(nextStatus, tx.id);
+  if (!updated.changes) return false;
+  if (nextStatus !== 'paid') {
+    const held = db.prepare("SELECT 1 FROM ledger_entries WHERE kind='tx_hold' AND source_id=?").get(tx.id);
+    const refunded = db.prepare("SELECT 1 FROM ledger_entries WHERE kind='tx_refund' AND source_id=?").get(tx.id);
+    if (held && !refunded) {
+      db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(randomUUID(), tx.user_id, TX_FEE, 'tx_refund', tx.id, actorId, customNote || `Pengembalian saldo ditahan (${nextStatus}) · ${tx.order_id}`, new Date().toISOString());
+    }
+  }
+  return true;
+}
+
+export function expireOverdueInTx(db, userId = null) {
+  const nowIso = new Date().toISOString();
+  const overdue = userId
+    ? db.prepare("SELECT * FROM transactions WHERE user_id=? AND status='pending' AND expires_at<=?").all(userId, nowIso)
+    : db.prepare("SELECT * FROM transactions WHERE status='pending' AND expires_at<=?").all(nowIso);
+  for (const tx of overdue) {
+    settleTxInTx(db, tx, 'expired', null, `Pengembalian saldo ditahan (kedaluwarsa) · ${tx.order_id}`);
+  }
+  return overdue.length;
+}
+
+export function expireOverdueTransactions(db, userId = null) {
+  return db.transaction(() => expireOverdueInTx(db, userId))();
 }
 

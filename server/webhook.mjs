@@ -40,8 +40,17 @@ export async function receiveQrisgateWebhook(req,db,secret){
   const next=events.get(event);
   if(order.status!=='pending')throw error(409,'Order sudah berstatus final.');
   if(next==='paid'){
-   if(balanceOf(db,order.user_id)<100)throw error(409,'Saldo merchant tidak mencukupi untuk biaya Rp100.');
-   db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,created_at) VALUES (?,?,?,?,?,?,?)').run(randomUUID(),order.user_id,-100,'paid_order_fee',order.id,null,new Date().toISOString());
+   const alreadyHeld=db.prepare("SELECT 1 FROM ledger_entries WHERE kind='tx_hold' AND source_id=?").get(order.id);
+   if(!alreadyHeld){
+    if(balanceOf(db,order.user_id)<100)throw error(409,'Saldo merchant tidak mencukupi untuk biaya Rp100.');
+    db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),order.user_id,-100,'paid_order_fee',order.id,null,`Biaya transaksi lunas · ${order.external_order_id}`,new Date().toISOString());
+   }
+  }else{
+   const held=db.prepare("SELECT 1 FROM ledger_entries WHERE kind='tx_hold' AND source_id=?").get(order.id);
+   const refunded=db.prepare("SELECT 1 FROM ledger_entries WHERE kind='tx_refund' AND source_id=?").get(order.id);
+   if(held&&!refunded){
+    db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),order.user_id,100,'tx_refund',order.id,null,`Pengembalian saldo ditahan (${next}) · ${order.external_order_id}`,new Date().toISOString());
+   }
   }
   db.prepare('UPDATE provider_orders SET status=?,paid_at=? WHERE id=? AND status=?').run(next,next==='paid'?new Date().toISOString():null,order.id,'pending');
   db.prepare('INSERT INTO webhook_deliveries (delivery_id,order_id,event,body_hash,received_at) VALUES (?,?,?,?,?)').run(deliveryId,order.id,event,bodyHash,new Date().toISOString());
