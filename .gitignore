@@ -11,3 +11,13 @@ data/
 test-results/
 playwright-report/
 .taste-skill/
+android-listener/.gradle/
+android-listener/.idea/
+android-listener/local.properties
+android-listener/**/build/
+*.apk
+*.aab
+*.jks
+*.keystore
+*.hprof
+DitsGate-tools/

@@ -26,11 +26,28 @@ test('ShopeePay unconfigured state and mobile layout do not imply verified payme
     await page.setViewportSize({ width, height: 844 });
     await page.goto('/dashboard/detectors/shopee');
     await expect(page.getByRole('heading', { name: 'Shopee Partner', exact: true })).toBeVisible();
-    await expect(page.getByRole('status')).toContainText('Belum terverifikasi');
+    await expect(page.locator('.shopee-status')).toContainText('Belum terverifikasi');
     await expect(page.getByRole('button', { name: 'Hubungkan & verifikasi' })).toBeDisabled();
     await expect(page.getByText(/ShopeePay Client ID/)).toBeVisible();
     await expect(page.getByText(/QRIS statis/)).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Listener notifikasi Android' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Atau login dengan akun Shopee (opsional)' })).toBeVisible();
+    await expect(page.getByRole('link', { name: /Login di Shopee Partner resmi/ })).toHaveAttribute('href', 'https://partner.shopee.co.id/');
+    await expect(page.getByLabel('No. HP atau email Shopee')).toBeVisible();
+    await expect(page.getByLabel('Password Shopee', { exact: true })).toBeVisible();
+    await expect(page.getByLabel('Sesi portal Shopee (opsional)')).toBeVisible();
+    await expect(page.getByLabel('Token get-transaction-list (opsional)')).toBeVisible();
+    await page.getByLabel('No. HP atau email Shopee').fill('dummy@example.invalid');
+    await page.getByLabel('Password Shopee', { exact: true }).fill('not-a-real-password');
+    await page.getByLabel('Sesi portal Shopee (opsional)').fill('dummy-cookie');
+    await page.getByLabel('Token get-transaction-list (opsional)').fill('dummy-token');
+    await expect(page.locator('.shopee-status')).toContainText('Belum terverifikasi');
+    expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('dummy-token');
+    await page.getByRole('button', { name: 'Kosongkan semua kolom' }).click();
+    await expect(page.getByLabel('Password Shopee', { exact: true })).toHaveValue('');
+    await expect(page.getByLabel('Sesi portal Shopee (opsional)')).toHaveValue('');
+    await expect(page.getByLabel('Token get-transaction-list (opsional)')).toHaveValue('');
+    await expect(page.getByRole('button', { name: 'Hubungkan & verifikasi' })).toBeDisabled();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px`).toBe(true);
   }
 });
@@ -42,6 +59,8 @@ test('ShopeePay configured credentials alone cannot enable a payment check', asy
     requests.push(`${route.request().method()} ${path}`);
     if (path === '/api/auth/login') return route.fulfill({ json: { token: 'test-session', user: { name: 'Merchant Test' } } });
     if (path === '/api/v1/shopeepay/config') return route.fulfill({ json: { data: { configured: true, environment: 'uat', status: 'not_verified', checkAvailable: false } } });
+    if (path === '/api/v1/shopee-listener') return route.fulfill({ json: { data: null } });
+    if (path === '/api/v1/shopee-listener/events') return route.fulfill({ json: { data: [] } });
     return route.fulfill({ status: 404, json: { error: 'Unknown path' } });
   });
   await page.goto('/dashboard/detectors/shopee');
@@ -53,11 +72,11 @@ test('ShopeePay configured credentials alone cannot enable a payment check', asy
   await page.getByLabel('Reference ID order ShopeePay').fill('ORDER-SHOPEE-001');
   await page.getByLabel('Nominal order (Rp)').fill('50000');
   await expect(page.getByRole('button', { name: 'Hubungkan & verifikasi' })).toBeDisabled();
-  await expect(page.getByRole('status')).toContainText('Belum terverifikasi');
+  await expect(page.locator('.shopee-status')).toContainText('Belum terverifikasi');
   expect(requests).not.toContain('POST /api/v1/shopeepay/check');
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('test-session');
   await page.getByRole('button', { name: 'Putuskan' }).click();
-  await expect(page.getByRole('status')).toContainText('Belum terverifikasi');
+  await expect(page.locator('.shopee-status')).toContainText('Belum terverifikasi');
 });
 
 test('ShopeePay status-check failure keeps unverified state and clears failed login password', async ({ page }) => {
@@ -73,7 +92,7 @@ test('ShopeePay status-check failure keeps unverified state and clears failed lo
   await page.getByRole('button', { name: 'Masuk ke akun merchant' }).click();
   await expect(page.getByRole('alert')).toContainText('Email atau password salah.');
   await expect(page.getByLabel('Kata sandi akun merchant')).toHaveValue('');
-  await expect(page.getByRole('status')).toContainText('Belum terverifikasi');
+  await expect(page.locator('.shopee-status')).toContainText('Belum terverifikasi');
 });
 
 test('developer settings stay unconnected and persist only a validated browser draft', async ({ page }) => {

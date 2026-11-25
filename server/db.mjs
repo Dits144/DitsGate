@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+﻿import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -54,42 +54,109 @@ export function openDatabase(file) {
       proof_reference TEXT UNIQUE, note TEXT,
       CHECK((status='pending' AND confirmed_by IS NULL AND confirmed_at IS NULL AND proof_reference IS NULL)
          OR (status='admin_confirmed' AND confirmed_by IS NOT NULL AND confirmed_at IS NOT NULL AND proof_reference IS NOT NULL)));
-    CREATE INDEX IF NOT EXISTS topup_owner ON topup_intents(user_id,created_at);
-    CREATE TABLE IF NOT EXISTS ledger_entries (
+   CREATE INDEX IF NOT EXISTS topup_owner ON topup_intents(user_id,created_at);
+   CREATE TABLE IF NOT EXISTS ledger_entries (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
       amount INTEGER NOT NULL CHECK(amount != 0),
       kind TEXT NOT NULL CHECK(kind IN ('admin_topup','paid_order_fee')),
       source_id TEXT NOT NULL, actor_id TEXT REFERENCES users(id),
       created_at TEXT NOT NULL,
       UNIQUE(kind,source_id));
-    CREATE INDEX IF NOT EXISTS ledger_owner ON ledger_entries(user_id,created_at,id);
+   CREATE INDEX IF NOT EXISTS ledger_owner ON ledger_entries(user_id,created_at,id);
   `);
   db.exec(`CREATE TABLE IF NOT EXISTS merchant_api_keys (
     id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
     webhook_url TEXT, qris_id TEXT REFERENCES qris_assets(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL, last_used_at TEXT, revoked_at TEXT);
-    CREATE INDEX IF NOT EXISTS merchant_keys_owner ON merchant_api_keys(user_id,created_at);
-    CREATE TABLE IF NOT EXISTS merchant_webhook_settings (
-    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    url TEXT, secret_hash TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS merchant_keys_owner ON merchant_api_keys(user_id,created_at);
+   CREATE TABLE IF NOT EXISTS merchant_webhook_settings (
+   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+   url TEXT, secret_hash TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
   `);
   db.exec(`CREATE TABLE IF NOT EXISTS shopee_listener_devices (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen_at TEXT);
-    CREATE TABLE IF NOT EXISTS shopee_listener_events (
-    id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    event_id TEXT NOT NULL, amount INTEGER NOT NULL, occurred_at TEXT NOT NULL,
-    issuer TEXT NOT NULL, received_at TEXT NOT NULL,
-    UNIQUE(user_id,event_id));
-    CREATE INDEX IF NOT EXISTS shopee_listener_events_owner ON shopee_listener_events(user_id,received_at);
-    CREATE TABLE IF NOT EXISTS android_mutation_signals (
-      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      event_id TEXT, source_app TEXT NOT NULL, title TEXT NOT NULL,
-      text_hash TEXT NOT NULL, amount INTEGER, received_at TEXT NOT NULL,
-      UNIQUE(user_id,event_id));
-    CREATE INDEX IF NOT EXISTS android_mutation_owner ON android_mutation_signals(user_id,received_at);
+   CREATE TABLE IF NOT EXISTS shopee_listener_events (
+   id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+   event_id TEXT NOT NULL, amount INTEGER NOT NULL, occurred_at TEXT NOT NULL,
+   issuer TEXT NOT NULL, received_at TEXT NOT NULL,
+   UNIQUE(user_id,event_id));
+   CREATE INDEX IF NOT EXISTS shopee_listener_events_owner ON shopee_listener_events(user_id,received_at);
+   CREATE TABLE IF NOT EXISTS android_mutation_signals (
+     id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     event_id TEXT, source_app TEXT NOT NULL, title TEXT NOT NULL,
+     text_hash TEXT NOT NULL, amount INTEGER, received_at TEXT NOT NULL,
+     UNIQUE(user_id,event_id));
+   CREATE INDEX IF NOT EXISTS android_mutation_owner ON android_mutation_signals(user_id,received_at);
+   CREATE TABLE IF NOT EXISTS shopee_portal_connections (
+     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+     store_id TEXT NOT NULL,
+     merchant_id TEXT NOT NULL,
+     token_enc TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'connected' CHECK(status IN ('connected','session_broken')),
+     last_checked_at TEXT,
+     last_error TEXT,
+     transaction_count INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
   `);
+  // Support tickets & messages
+  db.exec(`CREATE TABLE IF NOT EXISTS support_tickets (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    transaction_id TEXT, subject TEXT NOT NULL, description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','resolved','closed')),
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS tickets_owner ON support_tickets(user_id,created_at);
+   CREATE INDEX IF NOT EXISTS tickets_status ON support_tickets(status,created_at);
+   CREATE TABLE IF NOT EXISTS ticket_messages (
+    id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+    sender_id TEXT NOT NULL REFERENCES users(id), role TEXT NOT NULL CHECK(role IN ('merchant','admin')),
+    message TEXT NOT NULL, created_at TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS ticket_msg_owner ON ticket_messages(ticket_id,created_at);
+   CREATE TABLE IF NOT EXISTS platform_settings (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS subscription_orders (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    months INTEGER NOT NULL CHECK(months IN (1,2,3,5)),
+    base_amount INTEGER NOT NULL, unique_code INTEGER NOT NULL, total_amount INTEGER NOT NULL,
+    qris_payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid','expired')),
+    created_at TEXT NOT NULL, expires_at TEXT NOT NULL, paid_at TEXT, confirmed_by TEXT REFERENCES users(id));
+   CREATE INDEX IF NOT EXISTS sub_orders_owner ON subscription_orders(user_id,created_at);
+  `);
+  if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'subscription_expires_at')) {
+    db.exec('ALTER TABLE users ADD COLUMN subscription_expires_at TEXT');
+  }  const portalCols = db.prepare('PRAGMA table_info(shopee_portal_connections)').all().map(c => c.name);
+  const portalSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='shopee_portal_connections'").get()?.sql ?? '';
+  if (portalSchema.includes("'disconnected'")) {
+    // SQLite cannot alter a CHECK constraint. Preserve encrypted rows while upgrading the legacy table.
+    db.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE shopee_portal_connections RENAME TO shopee_portal_connections_legacy;
+      CREATE TABLE shopee_portal_connections (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        store_id TEXT NOT NULL, merchant_id TEXT NOT NULL, token_enc TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'connected' CHECK(status IN ('connected','session_broken')),
+        last_checked_at TEXT, last_error TEXT, transaction_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT INTO shopee_portal_connections
+        (user_id,store_id,merchant_id,token_enc,status,last_checked_at,last_error,transaction_count,created_at,updated_at)
+      SELECT user_id,store_id,merchant_id,token_enc,
+        'session_broken', -- Legacy rows must pass the new merchant/store probe before reporting connected.
+        ${portalCols.includes('last_checked_at') ? 'last_checked_at' : 'NULL'},
+        ${portalCols.includes('last_error') ? 'last_error' : 'NULL'},
+        ${portalCols.includes('transaction_count') ? 'transaction_count' : '0'},
+        created_at,updated_at FROM shopee_portal_connections_legacy;
+      DROP TABLE shopee_portal_connections_legacy;
+      COMMIT;`);
+  } else {
+    if (!portalCols.includes('status')) db.exec("ALTER TABLE shopee_portal_connections ADD COLUMN status TEXT NOT NULL DEFAULT 'session_broken'");
+    if (!portalCols.includes('last_checked_at')) db.exec('ALTER TABLE shopee_portal_connections ADD COLUMN last_checked_at TEXT');
+    if (!portalCols.includes('last_error')) db.exec('ALTER TABLE shopee_portal_connections ADD COLUMN last_error TEXT');
+    if (!portalCols.includes('transaction_count')) db.exec('ALTER TABLE shopee_portal_connections ADD COLUMN transaction_count INTEGER NOT NULL DEFAULT 0');
+  }
   db.transaction = (operation) => () => {
     db.exec('BEGIN IMMEDIATE');
     try { const result = operation(); db.exec('COMMIT'); return result; }
@@ -101,3 +168,4 @@ export function openDatabase(file) {
 export function balanceOf(db, userId) {
   return db.prepare('SELECT COALESCE(SUM(amount),0) AS balance FROM ledger_entries WHERE user_id=?').get(userId).balance;
 }
+

@@ -8,7 +8,7 @@ test('local API: auth, ownership, default bank/QRIS, transaction, and invalid CR
  const db=openDatabase(':memory:');const {server}=createApp({db});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const base=`http://127.0.0.1:${server.address().port}`;
  let token='',other='';const request=async(path,method='GET',payload,auth=token)=>{const response=await fetch(base+path,{method,headers:{'content-type':'application/json',...(auth?{authorization:`Bearer ${auth}`}:{})},body:payload?JSON.stringify(payload):undefined});return [response.status,await response.json()]};
  try{
-  assert.equal((await request('/api/health'))[1].mode,'local-sandbox');
+  assert.equal((await request('/api/health'))[1].mode,'production');
   assert.equal((await request('/api/v1/bank-accounts'))[0],401);
   assert.equal((await request('/api/auth/register','POST',{email:'a@test.example',password:'12-character-password',name:'Merchant A'}))[0],201);
   assert.equal((await request('/api/auth/register','POST',{email:'b@test.example',password:'12-character-password',name:'Merchant B'}))[0],201);

@@ -1,0 +1,15 @@
+ditsgate.prefixxx.web.id {
+    encode gzip
+
+    # Teruskan semua request API ke backend Node.js 26
+    handle /api/* {
+        reverse_proxy 127.0.0.1:5180
+    }
+
+    # Sajikan file static hasil vite build (dist/) dengan fallback SPA
+    handle {
+        root * /var/www/ditsgate/dist
+        try_files {path} /index.html
+        file_server
+    }
+}

@@ -7,13 +7,15 @@ import {openDatabase} from '../server/db.mjs';
 
 test('merchant can pair, inspect and revoke Android listener without claiming Shopee Partner connection', async()=>{
  const db=openDatabase(':memory:');
- const {server:api}=createApp({db});
- await new Promise(resolve=>api.listen(5180,'127.0.0.1',resolve));
+ const {server:api}=createApp({db,allowOrigin:'http://127.0.0.1:5179'});
+ await new Promise(resolve=>api.listen(0,'127.0.0.1',resolve));
+ const base=`http://127.0.0.1:${api.address().port}`;
+ const previousOrigin=process.env.VITE_DITSGATE_API_URL;
+ process.env.VITE_DITSGATE_API_URL=base;
  const vite=await createViteServer({configFile:'vite.config.ts',server:{host:'127.0.0.1',port:5179,strictPort:true}});
  let browser;
  try{
   await vite.listen();
-  const base='http://127.0.0.1:5180';
   const register=await fetch(base+'/api/auth/register',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'ui-listener@example.test',name:'Merchant',password:'password-12345678'})});
   assert.equal(register.status,201);
   browser=await chromium.launch({headless:true});
@@ -36,5 +38,5 @@ test('merchant can pair, inspect and revoke Android listener without claiming Sh
   await page.getByRole('button',{name:'Cabut token perangkat'}).click();
   await page.getByText('Perangkat belum dipasangkan').waitFor();
   assert.equal((await fetch(base+'/api/v1/mutations/ingest',{method:'POST',headers:{'content-type':'application/json','x-device-token':token},body:JSON.stringify({source_app:'com.gojek.gopaymerchant',title:'Pembayaran diterima',text:'Rp 100'})})).status,401);
- }finally{await browser?.close();await vite.close();await new Promise(resolve=>api.close(resolve));db.close()}
+ }finally{await browser?.close();await vite.close();await new Promise(resolve=>api.close(resolve));db.close();if(previousOrigin===undefined)delete process.env.VITE_DITSGATE_API_URL;else process.env.VITE_DITSGATE_API_URL=previousOrigin}
 });

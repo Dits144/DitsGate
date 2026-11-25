@@ -1,4 +1,5 @@
-export const API_ORIGIN = (import.meta as ImportMeta & {env?: Record<string, string | undefined>}).env?.VITE_DITSGATE_API_URL || 'http://127.0.0.1:5180';
+const envOrigin = (import.meta as ImportMeta & {env?: Record<string, string | undefined>}).env?.VITE_DITSGATE_API_URL;
+export const API_ORIGIN = envOrigin || (typeof window !== 'undefined' && !['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname) ? window.location.origin : 'http://127.0.0.1:5180');
 
 export function safeSandboxOrigin(value: string): string {
   const url = new URL(value);
@@ -8,16 +9,16 @@ export function safeSandboxOrigin(value: string): string {
   return url.origin;
 }
 
-export type SandboxKey = { id: string; name: string; prefix: string; webhookUrl: string | null; qrisId: string | null; revokedAt: string | null; deliveryEnabled: false };
-export type SandboxWebhook = { url: string | null; secretConfigured: boolean; deliveryEnabled: false };
+export type SandboxKey = { id: string; name: string; prefix: string; webhookUrl: string | null; qrisId: string | null; lastUsedAt?: string | null; revokedAt: string | null; deliveryEnabled: boolean };
+export type SandboxWebhook = { url: string | null; secretConfigured: boolean; deliveryEnabled: boolean };
 export type SandboxQris = { id: string; name: string };
 
 export async function sandboxRequest<T>(origin: string, path: string, method = 'GET', token?: string, payload?: unknown): Promise<T> {
   const response = await fetch(safeSandboxOrigin(origin) + path, {
     method,
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { ...(token && token !== 'cookie_session' ? { Authorization: `Bearer ${token}` } : {}), ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
     body: payload === undefined ? undefined : JSON.stringify(payload),
-    credentials: 'omit', cache: 'no-store',
+    credentials: 'include', cache: 'no-store',
   });
   const json = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(typeof json.error === 'string' ? json.error : `Permintaan gagal (${response.status}).`);
