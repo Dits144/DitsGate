@@ -125,9 +125,26 @@ export default function ShopeePartner() {
    setPortalCheckCount(data.transactionCount);setPortalLastCheck(data.lastCheckedAt);setPortalLastError(data.lastError);
   }catch(cause){if(active.current&&id===sequence.current)setPortalError(message(cause))}
  }
+ function extractPortalToken(raw:string):string{
+  const t=raw.trim();
+  // Try to parse as JSON (full get-transaction-list response)
+  try{
+    const j=JSON.parse(t) as Record<string,unknown>;
+    // data.metadata.token (most common)
+    const inner=j?.data as Record<string,unknown>;
+    const meta=inner?.metadata as Record<string,unknown>;
+    if(typeof meta?.token==='string'&&meta.token.length>10)return meta.token;
+    // metadata.token at top level
+    const topMeta=j?.metadata as Record<string,unknown>;
+    if(typeof topMeta?.token==='string'&&topMeta.token.length>10)return topMeta.token;
+    // token at top level
+    if(typeof j?.token==='string'&&(j.token as string).length>10)return j.token as string;
+  }catch{/* not JSON, use raw */}
+  return t;
+ }
  async function connectPortal(e:FormEvent<HTMLFormElement>){
   e.preventDefault();if(!token){merchantEmailInput.current?.scrollIntoView({behavior:'smooth',block:'center'});merchantEmailInput.current?.focus();return;}
-  const id=sequence.current,t=portalTokenInput.trim();
+  const id=sequence.current,t=extractPortalToken(portalTokenInput);
     if(!t){setPortalError('Token portal wajib diisi.');return}
   setPortalBusy(true);setPortalError('');
   try{
@@ -168,15 +185,15 @@ export default function ShopeePartner() {
    <section className="card shopee-portal-option" aria-labelledby="shopee-portal-option-title" data-testid="portal-connection">
     <span className="shopee-kicker">DETEKTOR QRIS · TOKEN PORTAL</span><h2 id="shopee-portal-option-title">Shopee Partner</h2>
     <p>Hubungkan token <code>data.metadata.token</code> dari portal partner.shopee.co.id. Server hanya menandai terhubung setelah berhasil membaca cakupan merchant dan toko. Feed mutasi bersifat baca-saja dan <strong>bukan bukti pembayaran terverifikasi</strong>.</p>
-    <p role="status" data-testid="portal-state"><strong>{!token?'Masuk ke akun merchant dahulu':portalStatus==='connected'?'Terhubung':portalStatus==='session_broken'?'Perlu dihubungkan ulang (SESSION_BROKEN)':portalStatus==='unconfigured'?'Belum terhubung':'Memuat status…'}</strong>{portalLastCheck?` · cek terakhir ${new Date(portalLastCheck).toLocaleString('id-ID')}`:''}{portalCheckCount?` · ${portalCheckCount} transaksi pada cek terakhir`:''}</p>
+    <p role="status" data-testid="portal-state"><strong>{!token?'Memuat…':portalStatus==='connected'?'Terhubung':portalStatus==='session_broken'?'Perlu dihubungkan ulang (SESSION_BROKEN)':portalStatus==='unconfigured'?'Belum terhubung':'Memuat status…'}</strong>{portalLastCheck?` · cek terakhir ${new Date(portalLastCheck).toLocaleString('id-ID')}`:''}{portalCheckCount?` · ${portalCheckCount} transaksi pada cek terakhir`:''}</p>
     {portalStatus==='session_broken'&&<p className="shopee-error">Sesi Shopee Partner berakhir. Ambil token baru; listener Android tetap dapat menerima sinyal notifikasi sebagai cadangan, bukan verifikasi settlement.</p>}
     {portalLastError&&<p className="shopee-help">Diagnostik: {portalLastError}</p>}
     <ol className="shopee-portal-steps"><li>Pasang QRIS statis toko di tab QRIS Saya (sekali saja).</li><li>Buka <a href="https://partner.shopee.co.id/" target="_blank" rel="noopener noreferrer">partner.shopee.co.id <ExternalLink size={14}/></a> → F12 → Network → filter <code>get-transaction-list</code> → Request Payload → salin <code>data.metadata.token</code>.</li><li>Tempel token, lalu klik Hubungkan &amp; verifikasi. Server membaca transaksi dan memastikan hanya satu cakupan toko/merchant; bila feed kosong atau bercampur, koneksi tidak akan diklaim berhasil. Jangan anggap feed sebagai settlement.</li></ol>
     <form className="shopee-portal-form" autoComplete="off" onSubmit={connectPortal}>
-      <label htmlFor="portal-transaction-token">Token dari portal Shopee (wajib)</label><textarea id="portal-transaction-token" rows={3} value={portalTokenInput} onChange={e=>setPortalTokenInput(e.target.value)} placeholder="Tempel data.metadata.token, biasanya diawali B:" autoComplete="off" spellCheck={false} required/>
+      <label htmlFor="portal-transaction-token">Token dari portal Shopee (wajib)</label><textarea id="portal-transaction-token" rows={4} value={portalTokenInput} onChange={e=>setPortalTokenInput(e.target.value)} placeholder="Tempel token (biasanya diawali B:...) ATAU tempel seluruh respons JSON get-transaction-list — token akan diekstrak otomatis." autoComplete="off" spellCheck={false} required/>
       <small>Cookie portal saja tidak cukup. Token hanya dikirim ke server DitsGate untuk probe, lalu disimpan terenkripsi jika terbukti dapat membaca cakupan toko.</small>
 
-      <div className="shopee-portal-actions"><button className="button primary" type={token?'submit':'button'} onClick={!token?()=>{merchantEmailInput.current?.scrollIntoView({behavior:'smooth',block:'center'});merchantEmailInput.current?.focus()}:undefined} disabled={portalBusy}>{!token?'Masuk untuk menghubungkan':portalBusy?'Memeriksa portal…':'Hubungkan & verifikasi'}</button><button className="button secondary" type="button" onClick={()=>void refreshPortalTransactions()} disabled={!token||portalBusy||portalStatus==='unconfigured'||portalStatus===null}>Segarkan mutasi</button><button className="button secondary" type="button" onClick={()=>void disconnectPortal()} disabled={!token||portalBusy||portalStatus==='unconfigured'||portalStatus===null}>Putuskan</button></div>
+      <div className="shopee-portal-actions"><button className="button primary" type="submit" disabled={portalBusy}>{portalBusy?'Memeriksa portal…':'Hubungkan & verifikasi'}</button><button className="button secondary" type="button" onClick={()=>void refreshPortalTransactions()} disabled={portalBusy||portalStatus==='unconfigured'||portalStatus===null}>Segarkan mutasi</button><button className="button secondary" type="button" onClick={()=>void disconnectPortal()} disabled={portalBusy||portalStatus==='unconfigured'||portalStatus===null}>Putuskan</button></div>
     </form>
     {portalError&&<p className="shopee-error" role="alert">{portalError}</p>}
     {portalTransactions.length>0&&<div className="shopee-signals"><h3>Mutasi terbaru · belum diverifikasi untuk settlement</h3><ul>{portalTransactions.map(row=><li key={row.id}><span>{row.orderId||row.id}</span><strong>{row.amountIdr==null?'Nominal tidak terbaca':new Intl.NumberFormat('id-ID',{style:'currency',currency:'IDR',maximumFractionDigits:0}).format(row.amountIdr)}</strong><small>{row.createdAt?new Date(row.createdAt).toLocaleString('id-ID'):'Waktu tidak tersedia'} · belum terverifikasi</small></li>)}</ul></div>}

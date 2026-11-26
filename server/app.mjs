@@ -236,8 +236,7 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
   throw fail(404,'Endpoint tidak ditemukan.');
   }
   if(path==='/api/v1/shopee-portal' && method==='POST'){
-    if(!session)throw fail(401,'Sesi merchant diperlukan.');
-    if(db.prepare('SELECT role FROM users WHERE id=?').get(owner)?.role!=='merchant')throw fail(403,'Akun merchant diperlukan.');
+    if(!session)throw fail(401,'Sesi diperlukan.');
     const x=await body(req);
     const cfg=parsePortalConfig(x);
     // Reconnection replaces an expired token only after a successful fresh probe.
@@ -256,8 +255,7 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
     return send(res,201,{data:{status:'connected',storeId:verified.storeId,merchantId:verified.merchantId,providerConnected:true,paymentVerified:false,transactions:verified.rows}});
   }
   if(path==='/api/v1/shopee-portal/transactions' && method==='GET'){
-    if(!session)throw fail(401,'Sesi merchant diperlukan.');
-    if(db.prepare('SELECT role FROM users WHERE id=?').get(owner)?.role!=='merchant')throw fail(403,'Akun merchant diperlukan.');
+    if(!session)throw fail(401,'Sesi diperlukan.');
     const connection=db.prepare('SELECT * FROM shopee_portal_connections WHERE user_id=?').get(owner);
     if(!connection)throw fail(404,'Belum terhubung ke Shopee.');
     const keyBuf=portalKey(shopeePortalKey);
@@ -284,14 +282,12 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
     }
   }
   if(path==='/api/v1/shopee-portal' && method==='GET'){
-    if(!session)throw fail(401,'Sesi merchant diperlukan.');
-    if(db.prepare('SELECT role FROM users WHERE id=?').get(owner)?.role!=='merchant')throw fail(403,'Akun merchant diperlukan.');
+    if(!session)throw fail(401,'Sesi diperlukan.');
     const connection=db.prepare('SELECT * FROM shopee_portal_connections WHERE user_id=?').get(owner);
     return send(res,200,{data:{status:connection?.status??'unconfigured',storeId:connection?.store_id??null,merchantId:connection?.merchant_id??null,providerConnected:connection?.status==='connected',lastCheckedAt:connection?.last_checked_at??null,lastError:connection?.last_error??null,transactionCount:connection?.transaction_count??0}});
   }
   if(path==='/api/v1/shopee-portal' && method==='DELETE'){
-    if(!session)throw fail(401,'Sesi merchant diperlukan.');
-    if(db.prepare('SELECT role FROM users WHERE id=?').get(owner)?.role!=='merchant')throw fail(403,'Akun merchant diperlukan.');
+    if(!session)throw fail(401,'Sesi diperlukan.');
     const connection=db.prepare('SELECT * FROM shopee_portal_connections WHERE user_id=?').get(owner);
     if(!connection)throw fail(404,'Belum terhubung ke Shopee Portal.');
     db.prepare('DELETE FROM shopee_portal_connections WHERE user_id=?').run(owner);
