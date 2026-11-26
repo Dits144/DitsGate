@@ -15,6 +15,7 @@ const ticketShape=r=>({id:r.id,userId:r.user_id,transactionId:r.transaction_id??
 const msgShape=r=>({id:r.id,ticketId:r.ticket_id,senderId:r.sender_id,role:r.role,message:r.message,createdAt:r.created_at});
 const subOrderShape=r=>({id:r.id,userId:r.user_id,months:r.months,baseAmount:r.base_amount,uniqueCode:r.unique_code,totalAmount:r.total_amount,qrisPayload:r.qris_payload,status:r.status,createdAt:r.created_at,expiresAt:r.expires_at,paidAt:r.paid_at??null});
 const SUB_PLANS=[{months:1,baseAmount:10000},{months:2,baseAmount:20000},{months:3,baseAmount:30000},{months:5,baseAmount:40000}];
+const getPlatformQrisPayload=(db)=>{const row=db.prepare("SELECT value FROM platform_settings WHERE key='subscription_qris_payload'").get();return row?.value?.trim()||process.env.DITSGATE_ADMIN_TOPUP_QRIS||'';};
 const merchantShape = (db,r) => {
  const txStats = db.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END),0) AS paid FROM transactions WHERE user_id=?").get(r.id);
  return {id:r.id,email:r.email,name:r.name,createdAt:r.created_at,isActive:r.is_active!==0,subscriptionExpiresAt:r.subscription_expires_at??null,balance:balanceOf(db,r.id),heldBalance:heldBalanceOf(db,r.id),transactionCount:txStats.total,paidCount:txStats.paid};
@@ -271,6 +272,20 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
  if(path==='/api/auth/logout'&&method==='POST'){if(token)db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hash(token));return send(res,200,{ok:true},{'set-cookie':'ditsgate_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'})}
  if(path==='/api/v1/balance'&&method==='GET'){expireOverdueTransactions(db,owner);return send(res,200,{balance:balanceOf(db,owner),heldBalance:heldBalanceOf(db,owner),currency:'IDR'})}
  if(path==='/api/v1/ledger'&&method==='GET'){expireOverdueTransactions(db,owner);return send(res,200,{data:db.prepare('SELECT * FROM ledger_entries WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 100').all(owner).map(ledgerShape)})}
+ if(path==='/api/v1/topups'&&method==='GET'){
+  if(!session)throw fail(401,'Sesi akun diperlukan.');
+  const rows=db.prepare('SELECT * FROM topup_intents WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 100').all(owner).map(topupShape);
+  return send(res,200,{data:rows,qrisPayload:getPlatformQrisPayload(db)});
+ }
+ if(path==='/api/v1/topups'&&method==='POST'){
+  if(!session)throw fail(401,'Sesi akun diperlukan.');
+  const x=await body(req);
+  const amount=Number(x.amount);
+  if(!Number.isSafeInteger(amount)||amount<5000||amount>999_999_999)throw fail(400,'Minimal nominal top up adalah Rp 5.000.');
+  const id=randomUUID(),stamp=now();
+  db.prepare('INSERT INTO topup_intents (id,user_id,amount,created_by,created_at) VALUES (?,?,?,?,?)').run(id,owner,amount,owner,stamp);
+  return send(res,201,{data:topupShape(db.prepare('SELECT * FROM topup_intents WHERE id=?').get(id)),qrisPayload:getPlatformQrisPayload(db),notice:'Permintaan top up dibuat. Lakukan transfer dan tunggu konfirmasi admin.'});
+ }
  if(path==='/api/v1/subscription'&&method==='GET'){
   const u=db.prepare('SELECT subscription_expires_at FROM users WHERE id=?').get(owner);
   const expiresAt=u?.subscription_expires_at??null;
@@ -381,12 +396,19 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
    })();
    return send(res,200,result);
   }
+  if(path==='/api/admin/topups'&&method==='GET'){
+   const statusFilter=String(url.searchParams.get('status')||'').trim();
+   const rows=db.prepare("SELECT t.*,u.name AS merchant_name,u.email AS merchant_email FROM topup_intents t JOIN users u ON t.user_id=u.id ORDER BY CASE WHEN t.status='pending' THEN 0 ELSE 1 END, t.created_at DESC, t.id DESC LIMIT 200").all();
+   const filtered=statusFilter&&statusFilter!=='all'?rows.filter(r=>r.status===statusFilter):rows;
+   return send(res,200,{data:filtered.map(r=>({...topupShape(r),merchantName:r.merchant_name,merchantEmail:r.merchant_email}))});
+  }
   if(path==='/api/admin/topups'&&method==='POST'){
    const x=await body(req);
-   if(!process.env.DITSGATE_ADMIN_TOPUP_QRIS)throw fail(503,'QRIS topup admin belum dikonfigurasi.');
+   const qrisPayload=getPlatformQrisPayload(db);
+   if(!qrisPayload)throw fail(503,'QRIS topup admin belum dikonfigurasi.');
    if(!validAmount(x.amount)||typeof x.merchantId!=='string'||!db.prepare("SELECT 1 FROM users WHERE id=? AND role='merchant'").get(x.merchantId))throw fail(400,'Merchant atau nominal tidak valid.');
    const id=randomUUID();db.prepare('INSERT INTO topup_intents (id,user_id,amount,created_by,created_at) VALUES (?,?,?,?,?)').run(id,x.merchantId,x.amount,owner,now());
-   return send(res,201,{data:topupShape(db.prepare('SELECT * FROM topup_intents WHERE id=?').get(id)),instructions:{qrisPayload:process.env.DITSGATE_ADMIN_TOPUP_QRIS,notice:'Pending; bayar ke QRIS admin yang dikonfigurasi. Kredit hanya setelah konfirmasi manual admin dengan bukti eksternal.'}})
+   return send(res,201,{data:topupShape(db.prepare('SELECT * FROM topup_intents WHERE id=?').get(id)),instructions:{qrisPayload,notice:'Pending; bayar ke QRIS admin yang dikonfigurasi. Kredit hanya setelah konfirmasi manual admin dengan bukti eksternal.'}})
   }
   const topupId=/^\/api\/admin\/topups\/([a-f0-9-]{36})\/confirm$/.exec(path)?.[1];
   if(topupId&&method==='POST'){
@@ -395,13 +417,27 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
    const result=db.transaction(()=>{
     const intent=db.prepare('SELECT * FROM topup_intents WHERE id=?').get(topupId);
     if(!intent)throw fail(404,'Topup tidak ditemukan.');
-    if(intent.status!=='pending')throw fail(409,'Topup sudah dikonfirmasi.');
+    if(intent.status!=='pending')throw fail(409,'Topup sudah diproses.');
     if(db.prepare('SELECT 1 FROM topup_intents WHERE proof_reference=?').get(reference))throw fail(409,'Referensi bukti sudah dipakai.');
     const stamp=now();
     db.prepare("UPDATE topup_intents SET status='admin_confirmed',confirmed_by=?,confirmed_at=?,proof_reference=?,note=? WHERE id=? AND status='pending'").run(owner,stamp,reference,x.note.trim(),topupId);
-    db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,created_at) VALUES (?,?,?,?,?,?,?)').run(randomUUID(),intent.user_id,intent.amount,'admin_topup',topupId,owner,stamp);
+    db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),intent.user_id,intent.amount,'admin_topup',topupId,owner,`Topup disetujui (${reference})`,stamp);
     return {data:topupShape(db.prepare('SELECT * FROM topup_intents WHERE id=?').get(topupId)),balance:balanceOf(db,intent.user_id),verification:'admin_confirmed_only'};
    })();return send(res,200,result)
+  }
+  const rejectTopupId=/^\/api\/admin\/topups\/([a-f0-9-]{36})\/reject$/.exec(path)?.[1];
+  if(rejectTopupId&&method==='POST'){
+   const x=await body(req);
+   const reason=typeof x.note==='string'&&x.note.trim()?x.note.trim().slice(0,500):'Ditolak oleh admin';
+   const result=db.transaction(()=>{
+    const intent=db.prepare('SELECT * FROM topup_intents WHERE id=?').get(rejectTopupId);
+    if(!intent)throw fail(404,'Topup tidak ditemukan.');
+    if(intent.status!=='pending')throw fail(409,'Topup sudah diproses.');
+    const stamp=now();
+    db.prepare("UPDATE topup_intents SET status='rejected',confirmed_by=?,confirmed_at=?,note=? WHERE id=? AND status='pending'").run(owner,stamp,reason,rejectTopupId);
+    return {data:topupShape(db.prepare('SELECT * FROM topup_intents WHERE id=?').get(rejectTopupId))};
+   })();
+   return send(res,200,result);
   }
   if(path==='/api/admin/tickets'&&method==='GET')return send(res,200,{data:db.prepare('SELECT t.*,u.name as merchant_name,u.email as merchant_email FROM support_tickets t JOIN users u ON t.user_id=u.id ORDER BY t.created_at DESC LIMIT 200').all().map(r=>({...ticketShape(r),merchantName:r.merchant_name,merchantEmail:r.merchant_email}))});
   const adminTicketId=/^\/api\/admin\/tickets\/([a-f0-9-]{36})$/.exec(path)?.[1];

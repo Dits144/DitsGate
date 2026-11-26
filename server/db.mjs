@@ -52,12 +52,13 @@ export function openDatabase(file) {
   db.exec(`CREATE TABLE IF NOT EXISTS topup_intents (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
       amount INTEGER NOT NULL CHECK(amount > 0 AND amount <= 999999999),
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','admin_confirmed')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','admin_confirmed','rejected')),
       created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
       confirmed_by TEXT REFERENCES users(id), confirmed_at TEXT,
       proof_reference TEXT UNIQUE, note TEXT,
       CHECK((status='pending' AND confirmed_by IS NULL AND confirmed_at IS NULL AND proof_reference IS NULL)
-         OR (status='admin_confirmed' AND confirmed_by IS NOT NULL AND confirmed_at IS NOT NULL AND proof_reference IS NOT NULL)));
+         OR (status='admin_confirmed' AND confirmed_by IS NOT NULL AND confirmed_at IS NOT NULL AND proof_reference IS NOT NULL)
+         OR (status='rejected' AND confirmed_by IS NOT NULL AND confirmed_at IS NOT NULL)));
    CREATE INDEX IF NOT EXISTS topup_owner ON topup_intents(user_id,created_at);
    CREATE TABLE IF NOT EXISTS ledger_entries (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
@@ -157,6 +158,26 @@ export function openDatabase(file) {
       COMMIT;`);
   } else if (!db.prepare('PRAGMA table_info(ledger_entries)').all().some(c => c.name === 'note')) {
     db.exec('ALTER TABLE ledger_entries ADD COLUMN note TEXT');
+  }
+  const topupSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='topup_intents'").get()?.sql ?? '';
+  if (!topupSchema.includes("'rejected'")) {
+    db.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE topup_intents RENAME TO topup_intents_legacy;
+      CREATE TABLE topup_intents (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+        amount INTEGER NOT NULL CHECK(amount > 0 AND amount <= 999999999),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','admin_confirmed','rejected')),
+        created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
+        confirmed_by TEXT REFERENCES users(id), confirmed_at TEXT,
+        proof_reference TEXT UNIQUE, note TEXT,
+        CHECK((status='pending' AND confirmed_by IS NULL AND confirmed_at IS NULL AND proof_reference IS NULL)
+           OR (status='admin_confirmed' AND confirmed_by IS NOT NULL AND confirmed_at IS NOT NULL AND proof_reference IS NOT NULL)
+           OR (status='rejected' AND confirmed_by IS NOT NULL AND confirmed_at IS NOT NULL)));
+      INSERT INTO topup_intents (id,user_id,amount,status,created_by,created_at,confirmed_by,confirmed_at,proof_reference,note)
+      SELECT id,user_id,amount,status,created_by,created_at,confirmed_by,confirmed_at,proof_reference,note FROM topup_intents_legacy;
+      DROP TABLE topup_intents_legacy;
+      CREATE INDEX IF NOT EXISTS topup_owner ON topup_intents(user_id,created_at);
+      COMMIT;`);
   }
   const portalCols = db.prepare('PRAGMA table_info(shopee_portal_connections)').all().map(c => c.name);
   const portalSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='shopee_portal_connections'").get()?.sql ?? '';

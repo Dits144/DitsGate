@@ -77,6 +77,20 @@ test('offline admin bootstrap, pending topup, audited exact-once credit and fund
   assert.equal((await request('/api/auth/login','POST',{email:'merchant@local.example',password:'merchant-password-long'})).status,403);
   await request(`/api/admin/merchants/${merchant.body.id}`,'PATCH',{isActive:true},token);
   assert.equal((await request('/api/auth/login','POST',{email:'merchant@local.example',password:'merchant-password-long'})).status,200);
+  const freshLogin=await request('/api/auth/login','POST',{email:'merchant@local.example',password:'merchant-password-long'});
+  const mTok=freshLogin.body.token;
+  assert.equal((await request('/api/v1/topups','POST',{amount:4999},mTok)).status,400);
+  const mTopup=await request('/api/v1/topups','POST',{amount:5000},mTok);
+  assert.equal(mTopup.status,201);assert.equal(mTopup.body.data.amount,5000);
+  const mTopup2=await request('/api/v1/topups','POST',{amount:10000},mTok);
+  assert.equal(mTopup2.status,201);
+  const adminQueue=await request('/api/admin/topups?status=pending','GET',null,token);
+  assert.equal(adminQueue.status,200);assert.ok(adminQueue.body.data.length>=2);
+  const approved=await request(`/api/admin/topups/${mTopup.body.data.id}/confirm`,'POST',{proofReference:'QRIS-5000-OK',note:'Diterima via QRIS'},token);
+  assert.equal(approved.status,200);assert.equal(approved.body.balance,13000);
+  const rejected=await request(`/api/admin/topups/${mTopup2.body.data.id}/reject`,'POST',{note:'Transfer belum masuk'},token);
+  assert.equal(rejected.status,200);assert.equal(rejected.body.data.status,'rejected');
+  assert.equal(balanceOf(db,merchant.body.id),13000);
   process.env.DITSGATE_ADMIN_EMAIL='other@local.example';
   assert.equal((await request('/api/admin/merchants','GET',null,token)).status,403);
  }finally{await new Promise(resolve=>server.close(resolve));db.close();if(oldEmail===undefined)delete process.env.DITSGATE_ADMIN_EMAIL;else process.env.DITSGATE_ADMIN_EMAIL=oldEmail;if(oldQris===undefined)delete process.env.DITSGATE_ADMIN_TOPUP_QRIS;else process.env.DITSGATE_ADMIN_TOPUP_QRIS=oldQris}

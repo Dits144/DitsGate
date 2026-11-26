@@ -22,9 +22,92 @@ type MerchantRow={id:string;email:string;name:string;balance:number;heldBalance?
 type LedgerRow={id:string;amount:number;kind:string;sourceId:string;note?:string|null;createdAt:string};
 type TxRow={id:string;orderId:string;amount:number;uniqueCode:number;status:string;createdAt:string;expiresAt:string;merchantName?:string;merchantEmail?:string};
 type Ticket={id:string;merchantName:string;merchantEmail:string;subject:string;status:string;createdAt:string;updatedAt:string};
-type Topup={id:string;merchantId:string;amount:number;status:string;createdAt:string;confirmedAt?:string|null};
+type Topup={id:string;merchantId:string;merchantName?:string;merchantEmail?:string;amount:number;status:string;note?:string|null;createdAt:string;confirmedAt?:string|null};
 type SubOrder={id:string;merchantName:string;merchantEmail:string;months:number;totalAmount:number;status:string;createdAt:string};
 type OverviewData={totalUsers:number;activeUsers:number;totalBalance:number;heldBalance:number;totalTransactions:number;pendingTransactions:number;paidTransactions:number;failedTransactions:number;paidVolume:number;totalFeeRevenue:number;openTickets:number;pendingSubscriptions:number;pendingTopups:number};
+
+function TopupRequests({token,notify,onChanged}:{token:string;notify:(m:string)=>void;onChanged:()=>void}){
+ const[rows,setRows]=useState<Topup[]|null>(null);
+ const[filter,setFilter]=useState('all');
+ const[proofs,setProofs]=useState<Record<string,string>>({});
+ const[notes,setNotes]=useState<Record<string,string>>({});
+ const[busy,setBusy]=useState<string|null>(null);
+
+ const load=useCallback(async()=>{
+  try{
+   const q=filter==='all'?'':'?status='+encodeURIComponent(filter);
+   const r=await fetch(API_ORIGIN+'/api/admin/topups'+q,{credentials:'include',headers:{Authorization:`Bearer ${token}`}});
+   if(r.ok){const j=await r.json();setRows(j.data??[]);}else setRows([]);
+  }catch{setRows([]);}
+ },[token,filter]);
+ useEffect(()=>{void load();},[load]);
+
+ const confirmTopup=async(t:Topup)=>{
+  setBusy(t.id);
+  const proofReference=(proofs[t.id]||'').trim()||`TOPUP-${t.id.slice(0,8).toUpperCase()}`;
+  const note=(notes[t.id]||'').trim()||'Disetujui admin melalui Panel Admin';
+  try{
+   const r=await fetch(API_ORIGIN+`/api/admin/topups/${t.id}/confirm`,{
+    method:'POST',credentials:'include',
+    headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},
+    body:JSON.stringify({proofReference,note}),
+   });
+   const j=await r.json().catch(()=>({}));
+   if(r.ok){notify(`Top up ${idr(t.amount)} disetujui & saldo ditambahkan`);await load();onChanged();}
+   else notify(j.error||'Gagal menyetujui top up');
+  }catch{notify('Kesalahan jaringan');}finally{setBusy(null);}
+ };
+
+ const rejectTopup=async(t:Topup)=>{
+  setBusy(t.id);
+  const note=(notes[t.id]||'').trim()||'Ditolak oleh admin';
+  try{
+   const r=await fetch(API_ORIGIN+`/api/admin/topups/${t.id}/reject`,{
+    method:'POST',credentials:'include',
+    headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},
+    body:JSON.stringify({note}),
+   });
+   const j=await r.json().catch(()=>({}));
+   if(r.ok){notify('Permintaan top up ditolak');await load();onChanged();}
+   else notify(j.error||'Gagal menolak top up');
+  }catch{notify('Kesalahan jaringan');}finally{setBusy(null);}
+ };
+
+ const pendingCount=rows?.filter(r=>r.status==='pending').length??0;
+
+ return <section className="card admin-ops-manage">
+  <div className="admin-ops-heading">
+   <div>
+    <h2>Permintaan Top Up Saldo {pendingCount>0&&<Badge tone="amber">{pendingCount} Menunggu</Badge>}</h2>
+    <p>Pengajuan top up dari halaman Top Up merchant (mulai Rp 5.000). Klik Setujui untuk langsung menambahkan saldo user.</p>
+   </div>
+   <div style={{display:'flex',gap:8,alignItems:'center'}}>
+    <select value={filter} onChange={e=>setFilter(e.target.value)} aria-label="Filter status topup">
+     <option value="all">Semua</option>
+     <option value="pending">Menunggu</option>
+     <option value="admin_confirmed">Disetujui</option>
+     <option value="rejected">Ditolak</option>
+    </select>
+    <button className="button secondary" onClick={()=>{void load();notify('Permintaan top up diperbarui')}}><RefreshCw size={15}/></button>
+   </div>
+  </div>
+  {rows===null?<p>Memuat…</p>:rows.length===0?<p className="admin-ops-empty">Belum ada permintaan top up dari merchant.</p>:
+  <div className="table-wrap" style={{marginTop:12}}><table><thead><tr><th>User</th><th>Nominal</th><th>Status</th><th>Waktu</th><th>Aksi Admin</th></tr></thead><tbody>
+   {rows.map(t=><tr key={t.id}>
+    <td><b>{t.merchantName||t.merchantId.slice(0,8)}</b><br/><small>{t.merchantEmail||''}</small></td>
+    <td><b>{idr(t.amount)}</b></td>
+    <td>{t.status==='admin_confirmed'?<Badge tone="green">Disetujui</Badge>:t.status==='rejected'?<Badge tone="muted">Ditolak</Badge>:<Badge tone="amber">Menunggu</Badge>}</td>
+    <td>{date(t.createdAt)}</td>
+    <td>{t.status==='pending'?<div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+     <input value={proofs[t.id]||''} onChange={e=>setProofs(v=>({...v,[t.id]:e.target.value}))} placeholder="Ref bukti (opsional)" style={{fontSize:12,padding:'4px 8px',width:140}}/>
+     <input value={notes[t.id]||''} onChange={e=>setNotes(v=>({...v,[t.id]:e.target.value}))} placeholder="Catatan (opsional)" style={{fontSize:12,padding:'4px 8px',width:150}}/>
+     <button className="button primary" style={{fontSize:12,padding:'4px 10px'}} onClick={()=>void confirmTopup(t)} disabled={busy===t.id}><CheckCircle2 size={13}/> Setujui (+Saldo)</button>
+     <button className="button secondary" style={{fontSize:12,padding:'4px 10px'}} onClick={()=>void rejectTopup(t)} disabled={busy===t.id}><XCircle size={13}/> Tolak</button>
+    </div>:<small className="muted">{t.note||'Selesai'}</small>}</td>
+   </tr>)}
+  </tbody></table></div>}
+ </section>;
+}
 
 function QrisPlatformSettings({token,notify,onChanged}:{token:string;notify:(m:string)=>void;onChanged:()=>void}){
  const[qrisPayload,setQrisPayload]=useState('');
@@ -409,6 +492,7 @@ export default function AdminOperations({notify}:{notify:(m:string)=>void}){
  ];
  return <div className="admin-ops">
   <div className="admin-ops-grid">{totals.map(({label,value,detail,icon:Icon})=><div key={label} className="card admin-ops-kpi"><div><span>{label}</span><Icon size={17}/></div><strong>{value}</strong><small>{detail}</small></div>)}</div>
+  <TopupRequests token={merchant.token} notify={notify} onChanged={()=>void loadOverview()}/>
   <MerchantList token={merchant.token} notify={notify} onChanged={()=>void loadOverview()}/>
   <GlobalTransactions token={merchant.token} notify={notify} onChanged={()=>void loadOverview()}/>
   <QrisPlatformSettings token={merchant.token} notify={notify} onChanged={()=>void loadOverview()}/>

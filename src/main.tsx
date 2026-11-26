@@ -163,7 +163,7 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
      <Route path="support/:id" element={<TicketDetail notify={p.notify}/>}/>
      <Route path="developers" element={<DeveloperSettings {...p}/>}/>
      <Route path="subscription" element={<SubscriptionPage balance={balanceShown} notify={p.notify}/>}/>
-     <Route path="topup" element={<Topup {...p} serverBalance={serverBalance}/>}/>
+     <Route path="topup" element={<Topup {...p} serverBalance={serverBalance} onRefreshBalance={refreshBalance}/>}/>
      <Route path="settings" element={<SettingsPage {...p}/>}/>
      <Route path="banks" element={<Banks {...p}/>}/>
      <Route path="admin" element={isAdmin?<AdminOperations notify={p.notify}/>:<Empty title="Akses ditolak" desc="Halaman ini hanya tersedia untuk administrator."/>}/>
@@ -365,10 +365,76 @@ function Mutations(p:Props){
 const snippets:Record<string,string>={'cURL':`curl -X POST ${API_ORIGIN}/api/v1/transactions \\\n  -H 'Authorization: Bearer <API_KEY>' \\\n  -H 'Content-Type: application/json' \\\n  -d '{"order_id":"ORDER-001","amount":50000}'`,'JavaScript / TypeScript':`const response = await fetch('${API_ORIGIN}/api/v1/transactions', {\n  method: 'POST',\n  headers: { Authorization: 'Bearer <API_KEY>', 'Content-Type': 'application/json' },\n  body: JSON.stringify({ order_id: 'ORDER-001', amount: 50000 })\n});`,PHP:`<?php\n$ch = curl_init('${API_ORIGIN}/api/v1/transactions');\ncurl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer <API_KEY>', 'Content-Type: application/json']);\ncurl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['order_id' => 'ORDER-001', 'amount' => 50000]));\n$res = curl_exec($ch);`,Python:`import requests\nrequests.post('${API_ORIGIN}/api/v1/transactions', json={'order_id': 'ORDER-001', 'amount': 50000}, headers={'Authorization': 'Bearer <API_KEY>'})`};
 function CodeTabs({notify}:{notify:(m:string)=>void}){const[lang,setLang]=useState('cURL');return <><div className="tabs">{Object.keys(snippets).map(k=><button key={k} className={lang===k?'active':''} onClick={()=>setLang(k)}>{k}</button>)}</div><div className="code-wrap"><button className="code-copy" onClick={()=>copy(snippets[lang],notify)} aria-label="Salin contoh kode"><Copy size={15}/> Salin</button><pre><code>{snippets[lang]}</code></pre></div></>}
 
-function Topup(p:Props&{serverBalance?:number|null}){
- const[amount,setAmount]=useState(50000);
+function Topup(p:Props&{serverBalance?:number|null;onRefreshBalance?:()=>void}){
+ const merchant=useMerchantSession();
+ const[amount,setAmount]=useState(5000);
+ const[serverTopups,setServerTopups]=useState<Array<{id:string;amount:number;status:string;note?:string|null;createdAt:string;confirmedAt?:string|null}>|null>(null);
+ const[qrisPayload,setQrisPayload]=useState('');
+ const[activeOrder,setActiveOrder]=useState<{id:string;amount:number}|null>(null);
+ const[busy,setBusy]=useState(false);
+
+ const loadTopups=React.useCallback(async()=>{
+  if(!merchant?.token){setServerTopups(null);return;}
+  try{
+   const headers:Record<string,string>=merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{};
+   const r=await fetch(API_ORIGIN+'/api/v1/topups',{credentials:'include',headers});
+   if(r.ok){
+    const j=await r.json();
+    setServerTopups(j.data??[]);
+    if(typeof j.qrisPayload==='string')setQrisPayload(j.qrisPayload);
+   }
+  }catch{}
+ },[merchant?.token]);
+
+ useEffect(()=>{void loadTopups();},[loadTopups]);
+
+ const submitTopup=async()=>{
+  const amt=Math.trunc(Number(amount));
+  if(!Number.isSafeInteger(amt)||amt<5000)return p.notify('Minimal top up Rp 5.000');
+  if(merchant?.token){
+   setBusy(true);
+   try{
+    const headers:Record<string,string>={'Content-Type':'application/json',...(merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{})};
+    const r=await fetch(API_ORIGIN+'/api/v1/topups',{method:'POST',credentials:'include',headers,body:JSON.stringify({amount:amt})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){p.notify(j.error||'Gagal mengajukan top up');return;}
+    if(typeof j.qrisPayload==='string')setQrisPayload(j.qrisPayload);
+    if(j.data?.id)setActiveOrder({id:j.data.id,amount:amt});
+    await loadTopups();
+    p.onRefreshBalance?.();
+    p.notify('Permintaan top up diajukan · Menunggu konfirmasi admin');
+   }catch{p.notify('Kesalahan jaringan')}finally{setBusy(false);}
+   return;
+  }
+  p.set(s=>({...s,topups:[{id:crypto.randomUUID(),amount:amt,createdAt:new Date().toISOString()},...s.topups]}));
+  p.notify('Permintaan top up dicatat. Hubungi admin untuk verifikasi.');
+ };
+
  const bal=p.serverBalance??p.s.balance;
- return <><Head title="Top Up Saldo Biaya" desc="Saldo platform untuk biaya transaksi; terpisah dari dana pembayaran pelanggan."/><div className="two-col"><section className="card"><div className="eyebrow">SALDO BIAYA</div><div className="big-number">{idr(bal)}</div><p>Isi saldo biaya untuk memproses transaksi API.</p><label>Nominal top up (Rp)<input type="number" min={10000} step={1000} value={amount} onChange={e=>setAmount(+e.target.value)}/></label><div className="row-actions">{[25000,50000,100000,250000].map(n=><button className="button secondary" key={n} onClick={()=>setAmount(n)}>{idr(n)}</button>)}</div><div className="info-line">Nominal permintaan: {idr(amount||0)} · Konfirmasi dilakukan oleh admin setelah transfer.</div><button className="button primary" onClick={()=>{if(amount<10000)return p.notify('Minimal top up Rp 10.000');p.set(s=>({...s,topups:[{id:crypto.randomUUID(),amount,createdAt:new Date().toISOString()},...s.topups]}));p.notify('Permintaan top up dicatat. Hubungi admin untuk verifikasi.')}}>Ajukan Top Up</button></section><section className="card"><h2>Riwayat Top Up</h2>{p.s.topups.length?p.s.topups.map(t=><div className="list-row" key={t.id}><div><b>{idr(t.amount)}</b><small>{date(t.createdAt)}</small></div><Badge tone="amber">Menunggu</Badge></div>):<Empty title="Belum ada riwayat top up" desc="Permintaan top up akan muncul di sini."/>}</section></div></>;
+ const list=serverTopups??p.s.topups.map(t=>({...t,status:'pending',note:null,confirmedAt:null}));
+ const statusLabel=(st:string)=>st==='admin_confirmed'?<Badge tone="green">Disetujui</Badge>:st==='rejected'?<Badge tone="muted">Ditolak</Badge>:<Badge tone="amber">Menunggu</Badge>;
+
+ return <><Head title="Top Up Saldo Biaya" desc="Saldo platform untuk biaya transaksi; terpisah dari dana pembayaran pelanggan." actions={merchant?.token?<button className="button secondary" onClick={()=>{void loadTopups();p.onRefreshBalance?.();p.notify('Riwayat top up diperbarui')}}><RefreshCw size={15}/> Segarkan</button>:undefined}/>
+ <div className="two-col">
+  <section className="card">
+   <div className="eyebrow">SALDO BIAYA</div>
+   <div className="big-number">{idr(bal)}</div>
+   <p>Isi saldo biaya untuk memproses transaksi API (minimal Rp 5.000).</p>
+   <label>Nominal top up (Rp)<input type="number" min={5000} step={1000} value={amount} onChange={e=>setAmount(+e.target.value)}/></label>
+   <div className="row-actions">{[5000,10000,25000,50000,100000,250000].map(n=><button type="button" className="button secondary" key={n} onClick={()=>setAmount(n)}>{idr(n)}</button>)}</div>
+   <div className="info-line">Nominal permintaan: {idr(amount||0)} · Masuk ke antrean Panel Admin untuk verifikasi transfer.</div>
+   <button type="button" className="button primary" disabled={busy} onClick={()=>void submitTopup()}>{busy?'Mengajukan...':'Ajukan Top Up'}</button>
+   {activeOrder&&qrisPayload&&<div style={{marginTop:18,paddingTop:16,borderTop:'1px solid var(--border)'}}>
+    <h3 style={{margin:'0 0 8px'}}>Bayar Top Up via QRIS ({idr(activeOrder.amount)})</h3>
+    <CheckoutQr qris={{image:'',fileName:'qris-topup.png',provider:'DitsGate',payload:qrisPayload,updatedAt:'',mode:'dynamic'}} total={activeOrder.amount}/>
+    <small className="muted" style={{display:'block',marginTop:8}}>ID Permintaan: <code>{activeOrder.id.slice(0,8)}</code> · Setelah transfer, saldo akan ditambah oleh admin.</small>
+   </div>}
+  </section>
+  <section className="card">
+   <h2>Riwayat Top Up</h2>
+   {list.length?list.map(t=><div className="list-row" key={t.id}><div><b>{idr(t.amount)}</b><small>{date(t.createdAt)}{t.note?` · ${t.note}`:''}</small></div>{statusLabel(t.status)}</div>):<Empty title="Belum ada riwayat top up" desc="Permintaan top up akan muncul di sini."/>}
+  </section>
+ </div></>;
 }
 
 function Subscription(p:Props){
