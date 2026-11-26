@@ -116,7 +116,11 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
  useEffect(()=>{document.documentElement.dataset.theme=p.s.theme==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p.s.theme},[p.s.theme]);
  useEffect(()=>{
   if(typeof window==='undefined'||window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
-  const lenis=new Lenis({duration:0.9,smoothWheel:true});
+  const lenis=new Lenis({
+   duration:0.85,
+   smoothWheel:true,
+   prevent:(node)=>Boolean(node instanceof Element&&node.closest('.sidebar, .modal, .popover, textarea, select'))
+  });
   let raf=0;
   const tick=(time:number)=>{lenis.raf(time);raf=requestAnimationFrame(tick);};
   raf=requestAnimationFrame(tick);
@@ -142,7 +146,7 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
   <div className={'sidebar-backdrop '+(mobile?'open':'')} onClick={()=>setMobile(false)}/>
   <aside className={'sidebar '+(mobile?'mobile-open':'')}>
    <div className="brand"><Link to="/dashboard" className="brand-mark">D</Link><div className="brand-text"><strong>DitsGate</strong><small>Payment infrastructure</small></div><button aria-label="Tutup menu" className="icon-btn mobile-close" onClick={()=>setMobile(false)}><X size={18}/></button></div>
-   <div className="sidebar-scroll">
+   <div className="sidebar-scroll" data-lenis-prevent>
     <div className="balance"><div className="balance-title">Saldo biaya <Wallet size={15}/></div><strong>{idr(balanceShown)}</strong>{heldBalance>0&&<small style={{display:'block',color:'var(--muted)',marginBottom:6}}>Ditahan: {idr(heldBalance)}</small>}<Link to="/dashboard/topup" className="button secondary balance-btn"><Plus size={14}/> Top Up</Link></div>
     {visibleSections.map(group=><nav key={group.label} aria-label={group.label} className="nav-group"><div className="nav-title">{group.label}</div>{group.items.map(([path,label,Icon,providerId])=><NavLink key={path} to={path} end={path==='/dashboard'} className={({isActive})=>'nav-link '+(isActive?'active':'')} title={label}>{providerId?<ProviderIcon id={providerId} size={18}/>:<Icon size={17}/>}<span>{label}</span></NavLink>)}</nav>)}
    </div>
