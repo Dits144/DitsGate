@@ -20,14 +20,17 @@ export function TicketList({notify}:{notify:(m:string)=>void}){
  const merchant=useMerchantSession();
  const nav=useNavigate();
  const[tickets,setTickets]=useState<Ticket[]|null>(null);
+ const[error,setError]=useState('');
  const[loading,setLoading]=useState(false);
  const load=async()=>{
   if(!merchant?.token)return;
-  setLoading(true);
+  setLoading(true);setError('');
   try{
-   const r=await fetch(API_ORIGIN+'/api/v1/tickets',{headers:{Authorization:`Bearer ${merchant.token}`}});
+   const headers:Record<string,string>=merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{};
+   const r=await fetch(API_ORIGIN+'/api/v1/tickets',{credentials:'include',headers});
    if(r.ok){const j=await r.json();setTickets(j.data??[]);}
-  }catch{}finally{setLoading(false);}
+   else{const j=await r.json().catch(()=>({}));setError(j.error||`Gagal memuat tiket (${r.status}).`);setTickets([]);}
+  }catch{setError('Kesalahan jaringan saat memuat tiket.');setTickets([]);}finally{setLoading(false);}
  };
  useEffect(()=>{void load();},[merchant?.token]);
 
@@ -35,6 +38,7 @@ export function TicketList({notify}:{notify:(m:string)=>void}){
 
  return <>
   <div className="page-head"><div><h1>Tiket Pengaduan</h1><p>Ajukan pertanyaan atau keluhan seputar transaksi.</p></div><div className="head-actions"><button className="button secondary" onClick={()=>{void load();notify('Daftar tiket diperbarui')}} disabled={loading}><RefreshCw size={15}/> Segarkan</button><button className="button primary" onClick={()=>nav('/dashboard/support/new')}><Plus size={16}/> Buat Tiket</button></div></div>
+  {error&&<div className="info-line" role="alert" style={{marginBottom:14}}><AlertCircle size={16}/> {error}</div>}
   <section className="card">
    {tickets===null?<div className="empty"><p>Memuat...</p></div>:tickets.length===0?<Empty title="Belum ada tiket" desc="Ajukan tiket bila ada pertanyaan atau kendala transaksi." action={<button className="button primary" onClick={()=>nav('/dashboard/support/new')}><Plus size={16}/> Buat Tiket Pertama</button>}/>:
    <div className="table-wrap"><table><thead><tr><th>ID Tiket</th><th>Subjek</th><th>Transaksi</th><th>Status</th><th>Terakhir Diperbarui</th><th>Aksi</th></tr></thead><tbody>

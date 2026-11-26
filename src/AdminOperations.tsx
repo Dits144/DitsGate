@@ -550,7 +550,7 @@ function TicketAdmin({token,notify,onChanged}:{token:string;notify:(m:string)=>v
  const tone=(s:string)=>s==='open'?'amber':s==='in_progress'?'blue':s==='resolved'?'green':'muted';
  const label=(s:string)=>({open:'Terbuka',in_progress:'Diproses',resolved:'Selesai',closed:'Ditutup'}[s]??s);
  return <section className="card admin-ops-manage">
-  <div className="admin-ops-heading"><div><h2>Tiket Pengaduan</h2><p>Semua tiket merchant.</p></div><button className="button secondary" onClick={()=>{void load();notify('Tiket diperbarui')}}><RefreshCw size={15}/></button></div>
+  <div className="admin-ops-heading"><div><h2>Tiket Pengaduan</h2><p>Semua tiket merchant.</p></div><button className="button secondary" aria-label="Segarkan tiket pengaduan" onClick={()=>{void load();notify('Tiket diperbarui')}}><RefreshCw size={15}/></button></div>
   {tickets===null?<p>Memuat…</p>:tickets.length===0?<p className="admin-ops-empty">Belum ada tiket.</p>:
   <div className="table-wrap"><table><thead><tr><th>ID</th><th>Merchant</th><th>Subjek</th><th>Status</th><th>Dibuat</th><th>Aksi</th></tr></thead><tbody>
    {tickets.map(t=><tr key={t.id}><td><small style={{fontFamily:'monospace'}}>{t.id.slice(0,8)}…</small></td><td><b>{t.merchantName}</b><br/><small>{t.merchantEmail}</small></td><td>{t.subject}</td><td><Badge tone={tone(t.status)}>{label(t.status)}</Badge></td><td>{date(t.createdAt)}</td>

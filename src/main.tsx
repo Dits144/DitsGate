@@ -133,7 +133,7 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
    <header className="topbar">
     <div className="top-left"><button className="icon-btn menu-trigger" aria-label="Buka menu" onClick={()=>setMobile(true)}><Menu size={20}/></button><span className="breadcrumb">Workspace <ChevronRight size={14}/> <b>{title}</b></span></div>
     <div className="top-right">
-     <Badge tone="blue">{merchant?'MERCHANT':'TAMU'}</Badge>
+     <Badge tone="blue">{merchant.user.role==='admin'?'ADMIN':'MERCHANT'}</Badge>
      <button className="icon-btn" aria-label="Ubah tema" title="Ubah tema" onClick={()=>p.set(v=>({...v,theme:v.theme==='light'?'dark':'light'}))}>{p.s.theme==='dark'?<Sun size={18}/>:<Moon size={18}/>}</button>
      <div className="relative"><button className="icon-btn" aria-label="Notifikasi" onClick={()=>setAlert(v=>!v)}><Bell size={18}/></button>{alert&&<div className="popover"><b>Notifikasi</b><p>{portalBroken?'Sesi Shopee Partner berakhir. Hubungkan ulang di Detektor.':'Belum ada notifikasi baru.'}</p></div>}</div>
      <div className="relative"><button className="account-btn" aria-label="Menu akun" onClick={()=>setAccount(v=>!v)}><span className="avatar">{merchant?.user.name.slice(0,2).toUpperCase()||'DG'}</span><span>{merchant?.user.name||'Masuk Akun'}</span><ChevronDown size={14}/></button>
@@ -193,6 +193,7 @@ function Overview(p:Props&{open:()=>void;serverBalance:number|null}){
 
  const refresh=async()=>{
   if(!merchant?.token){setServerTx(null);setServerLedger(null);return;}
+  if(merchant.user.role==='admin'){setServerTx([]);setServerLedger([]);return;}
   const headers:Record<string,string>=merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{};
   const opts={credentials:'include' as const,headers};
   try{
