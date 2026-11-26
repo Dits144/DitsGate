@@ -5,6 +5,7 @@ import { openDatabase, balanceOf, heldBalanceOf, settleTxInTx, expireOverdueInTx
 import { validateWebhookUrl, deliverWebhook } from './outbound-webhook.mjs';
 import { shopeepayConfig } from './shopeepay.mjs';
 import { parsePortalConfig, portalKey, encryptPortalToken, decryptPortalToken, probeShopeePortal, readShopeePortalFeed, PortalError } from './shopee-portal.mjs';
+import { notifyPortalBroken } from './mailer.mjs';
 const keyShape=r=>({id:r.id,name:r.name,prefix:r.prefix,webhookUrl:r.webhook_url,qrisId:r.qris_id,createdAt:r.created_at,lastUsedAt:r.last_used_at,revokedAt:r.revoked_at,environment:'production',deliveryEnabled:true});
 const webhookShape=r=>({url:r?.url??null,secretConfigured:!!r?.secret_hash,createdAt:r?.created_at??null,updatedAt:r?.updated_at??null,deliveryEnabled:true});
 const validName=s=>typeof s==='string'&&s.trim().length>=1&&s.trim().length<=100;
@@ -21,6 +22,56 @@ const getTopupMode=(db)=>{const row=db.prepare("SELECT value FROM platform_setti
 const getAdminWhatsapp=(db)=>{const row=db.prepare("SELECT value FROM platform_settings WHERE key='admin_whatsapp'").get();return row?.value?.trim()||DEFAULT_ADMIN_WA;};
 const getAdminPortalConnection=(db)=>db.prepare("SELECT c.* FROM shopee_portal_connections c JOIN users u ON u.id=c.user_id WHERE u.role='admin' ORDER BY c.updated_at DESC LIMIT 1").get();
 
+function markPortalBrokenAndNotify(db, userId, lastError, tokenEnc = null) {
+ const stamp = now();
+ const existing = db.prepare('SELECT token_enc, broken_notified_at FROM shopee_portal_connections WHERE user_id=?').get(userId);
+ if (!existing) return 0;
+ if (tokenEnc !== null && existing.token_enc !== tokenEnc) return 0;
+ const sql = tokenEnc !== null
+  ? "UPDATE shopee_portal_connections SET status='session_broken',last_checked_at=?,last_error=? WHERE user_id=? AND token_enc=?"
+  : "UPDATE shopee_portal_connections SET status='session_broken',last_checked_at=?,last_error=? WHERE user_id=?";
+ const args = tokenEnc !== null ? [stamp, lastError, userId, tokenEnc] : [stamp, lastError, userId];
+ const res = db.prepare(sql).run(...args);
+ if (res.changes > 0 && !existing.broken_notified_at) {
+  db.prepare('UPDATE shopee_portal_connections SET broken_notified_at=? WHERE user_id=? AND broken_notified_at IS NULL').run(stamp, userId);
+  const user = db.prepare('SELECT email, name FROM users WHERE id=?').get(userId);
+  if (user?.email) {
+   void notifyPortalBroken({ to: user.email, name: user.name, lastError }).catch(() => {});
+  }
+ }
+ return res.changes;
+}
+
+export async function checkAllPortalConnections(db, { shopeePortalFetch = globalThis.fetch, shopeePortalKey = process.env.DITSGATE_PORTAL_ENCRYPTION_KEY, minIntervalMs = 300_000 } = {}) {
+ const keyBuf = portalKey(shopeePortalKey);
+ if (!keyBuf || keyBuf.length !== 32) return { checked: 0, broken: 0 };
+ const conns = db.prepare("SELECT * FROM shopee_portal_connections WHERE status='connected'").all();
+ const cutoff = Date.now() - minIntervalMs;
+ let checked = 0, broken = 0;
+ for (const conn of conns) {
+  if (conn.last_checked_at && Date.parse(conn.last_checked_at) > cutoff) continue;
+  checked++;
+  let token;
+  try {
+   token = decryptPortalToken(keyBuf, conn.token_enc);
+  } catch {
+   markPortalBrokenAndNotify(db, conn.user_id, 'Kunci token portal tidak cocok atau data rusak.', conn.token_enc);
+   broken++;
+   continue;
+  }
+  try {
+   const rows = await readShopeePortalFeed({ fetchImpl: shopeePortalFetch, token, merchantId: conn.merchant_id, storeId: conn.store_id });
+   db.prepare("UPDATE shopee_portal_connections SET status='connected',last_checked_at=?,last_error=NULL,transaction_count=? WHERE user_id=? AND token_enc=?").run(now(), rows.length, conn.user_id, conn.token_enc);
+  } catch (e) {
+   if (e instanceof PortalError) {
+    markPortalBrokenAndNotify(db, conn.user_id, e.message, conn.token_enc);
+    broken++;
+   }
+  }
+ }
+ return { checked, broken };
+}
+
 export async function syncAdminShopeeTopups(db,{shopeePortalFetch=globalThis.fetch,shopeePortalKey=process.env.DITSGATE_PORTAL_ENCRYPTION_KEY,force=false}={}){
  const mode=getTopupMode(db);
  if(!force&&mode!=='auto')return {skipped:true,reason:'manual_mode',matched:0,checked:0};
@@ -36,7 +87,7 @@ export async function syncAdminShopeeTopups(db,{shopeePortalFetch=globalThis.fet
  try{
   token=decryptPortalToken(keyBuf,conn.token_enc);
  }catch{
-  db.prepare("UPDATE shopee_portal_connections SET status='session_broken',last_checked_at=?,last_error=? WHERE user_id=?").run(now(),'Kunci token portal tidak cocok atau data rusak.',conn.user_id);
+  markPortalBrokenAndNotify(db,conn.user_id,'Kunci token portal tidak cocok atau data rusak.',conn.token_enc);
   throw fail(500,'Token portal admin tidak dapat didekripsi.');
  }
  let rows;
@@ -45,7 +96,7 @@ export async function syncAdminShopeeTopups(db,{shopeePortalFetch=globalThis.fet
   db.prepare("UPDATE shopee_portal_connections SET status='connected',last_checked_at=?,last_error=NULL,transaction_count=? WHERE user_id=? AND token_enc=?").run(now(),rows.length,conn.user_id,conn.token_enc);
  }catch(e){
   if(e instanceof PortalError){
-   db.prepare("UPDATE shopee_portal_connections SET status='session_broken',last_checked_at=?,last_error=? WHERE user_id=? AND token_enc=?").run(now(),e.message,conn.user_id,conn.token_enc);
+   markPortalBrokenAndNotify(db,conn.user_id,e.message,conn.token_enc);
    throw fail(e.status,e.message);
   }
   throw e;
@@ -251,7 +302,7 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
     }
     const tokenEnc=encryptPortalToken(keyBuf,cfg.token);
     const now=new Date().toISOString();
-    db.prepare("INSERT INTO shopee_portal_connections (user_id,store_id,merchant_id,token_enc,status,last_checked_at,last_error,transaction_count,created_at,updated_at) VALUES (?,?,?,?,'connected',?,NULL,0,?,?) ON CONFLICT(user_id) DO UPDATE SET store_id=excluded.store_id,merchant_id=excluded.merchant_id,token_enc=excluded.token_enc,status='connected',last_checked_at=excluded.last_checked_at,last_error=NULL,transaction_count=0,updated_at=excluded.updated_at").run(owner,verified.storeId,verified.merchantId,tokenEnc,now,now,now);
+    db.prepare("INSERT INTO shopee_portal_connections (user_id,store_id,merchant_id,token_enc,status,last_checked_at,last_error,transaction_count,broken_notified_at,created_at,updated_at) VALUES (?,?,?,?,'connected',?,NULL,0,NULL,?,?) ON CONFLICT(user_id) DO UPDATE SET store_id=excluded.store_id,merchant_id=excluded.merchant_id,token_enc=excluded.token_enc,status='connected',last_checked_at=excluded.last_checked_at,last_error=NULL,transaction_count=0,broken_notified_at=NULL,updated_at=excluded.updated_at").run(owner,verified.storeId,verified.merchantId,tokenEnc,now,now,now);
     return send(res,201,{data:{status:'connected',storeId:verified.storeId,merchantId:verified.merchantId,providerConnected:true,paymentVerified:false,transactions:verified.rows}});
   }
   if(path==='/api/v1/shopee-portal/transactions' && method==='GET'){
@@ -264,7 +315,7 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
     try{
       token=decryptPortalToken(keyBuf,connection.token_enc);
     }catch{
-      db.prepare("UPDATE shopee_portal_connections SET status='session_broken',last_checked_at=?,last_error=? WHERE user_id=?").run(now(),'Kunci token portal tidak cocok atau data rusak.',owner);
+      markPortalBrokenAndNotify(db,owner,'Kunci token portal tidak cocok atau data rusak.',connection.token_enc);
       throw fail(500,'Token portal tidak dapat didekripsi. Hubungkan ulang dengan token baru.');
     }
     try{
@@ -274,8 +325,8 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
       return send(res,200,{data:rows});
     }catch(e){
       if(e instanceof PortalError){
-        const changed=db.prepare("UPDATE shopee_portal_connections SET status='session_broken',last_checked_at=?,last_error=? WHERE user_id=? AND token_enc=?").run(now(),e.message,owner,connection.token_enc);
-        if(!changed.changes)throw fail(409,'Koneksi portal berubah selama pembacaan mutasi. Segarkan kembali.');
+        const changes=markPortalBrokenAndNotify(db,owner,e.message,connection.token_enc);
+        if(!changes)throw fail(409,'Koneksi portal berubah selama pembacaan mutasi. Segarkan kembali.');
         throw fail(e.status,e.message);
       }
       throw e;
@@ -585,7 +636,7 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
    catch(e){if(e instanceof PortalError)throw fail(e.status,e.message);throw e;}
    const tokenEnc=encryptPortalToken(keyBuf,cfg.token);
    const stamp=now();
-   db.prepare("INSERT INTO shopee_portal_connections (user_id,store_id,merchant_id,token_enc,status,last_checked_at,last_error,transaction_count,created_at,updated_at) VALUES (?,?,?,?,'connected',?,NULL,?,?,?) ON CONFLICT(user_id) DO UPDATE SET store_id=excluded.store_id,merchant_id=excluded.merchant_id,token_enc=excluded.token_enc,status='connected',last_checked_at=excluded.last_checked_at,last_error=NULL,transaction_count=excluded.transaction_count,updated_at=excluded.updated_at").run(owner,verified.storeId,verified.merchantId,tokenEnc,stamp,verified.rows.length,stamp,stamp);
+   db.prepare("INSERT INTO shopee_portal_connections (user_id,store_id,merchant_id,token_enc,status,last_checked_at,last_error,transaction_count,broken_notified_at,created_at,updated_at) VALUES (?,?,?,?,'connected',?,NULL,?,NULL,?,?) ON CONFLICT(user_id) DO UPDATE SET store_id=excluded.store_id,merchant_id=excluded.merchant_id,token_enc=excluded.token_enc,status='connected',last_checked_at=excluded.last_checked_at,last_error=NULL,transaction_count=excluded.transaction_count,broken_notified_at=NULL,updated_at=excluded.updated_at").run(owner,verified.storeId,verified.merchantId,tokenEnc,stamp,verified.rows.length,stamp,stamp);
    let matched=0;
    if(getTopupMode(db)==='auto'){
     try{const s=await syncAdminShopeeTopups(db,{shopeePortalFetch,shopeePortalKey,force:true});matched=s.matched||0;}catch{}

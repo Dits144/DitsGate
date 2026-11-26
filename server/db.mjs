@@ -107,6 +107,7 @@ export function openDatabase(file) {
      last_checked_at TEXT,
      last_error TEXT,
      transaction_count INTEGER NOT NULL DEFAULT 0,
+     broken_notified_at TEXT,
      created_at TEXT NOT NULL,
      updated_at TEXT NOT NULL
    );
@@ -217,6 +218,7 @@ export function openDatabase(file) {
     if (!portalCols.includes('last_checked_at')) db.exec('ALTER TABLE shopee_portal_connections ADD COLUMN last_checked_at TEXT');
     if (!portalCols.includes('last_error')) db.exec('ALTER TABLE shopee_portal_connections ADD COLUMN last_error TEXT');
     if (!portalCols.includes('transaction_count')) db.exec('ALTER TABLE shopee_portal_connections ADD COLUMN transaction_count INTEGER NOT NULL DEFAULT 0');
+    if (!portalCols.includes('broken_notified_at')) db.exec('ALTER TABLE shopee_portal_connections ADD COLUMN broken_notified_at TEXT');
   }
   db.transaction = (operation) => () => {
     db.exec('BEGIN IMMEDIATE');
