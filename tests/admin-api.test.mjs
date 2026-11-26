@@ -91,9 +91,48 @@ test('offline admin bootstrap, pending topup, audited exact-once credit and fund
   const rejected=await request(`/api/admin/topups/${mTopup2.body.data.id}/reject`,'POST',{note:'Transfer belum masuk'},token);
   assert.equal(rejected.status,200);assert.equal(rejected.body.data.status,'rejected');
   assert.equal(balanceOf(db,merchant.body.id),13000);
+  const modeRes=await request('/api/admin/settings','PUT',{topupMode:'auto',adminWhatsapp:'6282120196167'},token);
+  assert.equal(modeRes.status,200);assert.equal(modeRes.body.data.topupMode,'auto');
+  assert.equal(modeRes.body.data.adminWhatsapp,'6282120196167');
   process.env.DITSGATE_ADMIN_EMAIL='other@local.example';
   assert.equal((await request('/api/admin/merchants','GET',null,token)).status,403);
  }finally{await new Promise(resolve=>server.close(resolve));db.close();if(oldEmail===undefined)delete process.env.DITSGATE_ADMIN_EMAIL;else process.env.DITSGATE_ADMIN_EMAIL=oldEmail;if(oldQris===undefined)delete process.env.DITSGATE_ADMIN_TOPUP_QRIS;else process.env.DITSGATE_ADMIN_TOPUP_QRIS=oldQris}
+});
+
+test('admin ShopeePay listener auto-credits matching unique-code topup via get-transaction-list',async()=>{
+ const oldEmail=process.env.DITSGATE_ADMIN_EMAIL;
+ process.env.DITSGATE_ADMIN_EMAIL='auto-admin@local.example';
+ let mockTxAmount=0;
+ const mockFetch=async(url)=>{
+  if(url.endsWith('get-store-list'))return {ok:true,url,redirected:false,text:async()=>JSON.stringify({code:0,data:{list:[{storeId:999,merchantId:888}],storeCount:1}})};
+  if(url.endsWith('get-transaction-list'))return {ok:true,url,redirected:false,text:async()=>JSON.stringify({code:0,data:{list:mockTxAmount?[{transactionId:'sp-tx-1001',storeId:999,merchantId:888,amount:mockTxAmount,createTime:Math.floor(Date.now()/1000),status:3}]:[{transactionId:'sp-init',storeId:999,merchantId:888,amount:100,createTime:Math.floor((Date.now()-86400_000)/1000),status:3}],last_position:''}})};
+  throw new Error('unexpected url '+url);
+ };
+ const db=openDatabase(':memory:');
+ const {server}=createApp({db,shopeePortalKey:Buffer.alloc(32,9).toString('base64url'),shopeePortalFetch:mockFetch});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const base=`http://127.0.0.1:${server.address().port}`;
+ const req=async(p,m='GET',d,tok)=>{const r=await fetch(base+p,{method:m,headers:{...(tok?{authorization:`Bearer ${tok}`}:{}),...(d?{'content-type':'application/json'}:{})},body:d?JSON.stringify(d):undefined});return {status:r.status,body:await r.json()}};
+ try{
+  await bootstrapAdmin(db,{email:'auto-admin@local.example',password:'admin-password-very-long'});
+  const adminTok=(await req('/api/auth/login','POST',{email:'auto-admin@local.example',password:'admin-password-very-long'})).body.token;
+  await req('/api/auth/register','POST',{email:'buyer@local.example',password:'buyer-password-long',name:'Buyer'});
+  const buyerLogin=await req('/api/auth/login','POST',{email:'buyer@local.example',password:'buyer-password-long'});
+  const buyerTok=buyerLogin.body.token,buyerId=buyerLogin.body.user.id;
+  await req('/api/admin/settings','PUT',{topupMode:'auto'},adminTok);
+  const conn=await req('/api/admin/shopee-portal','POST',{token:'shopee-admin-portal-token-1234'},adminTok);
+  assert.equal(conn.status,201);assert.equal(conn.body.data.status,'connected');
+  const topup=await req('/api/v1/topups','POST',{amount:5000},buyerTok);
+  assert.equal(topup.status,201);assert.equal(topup.body.mode,'auto');assert.equal(topup.body.listenerOnline,true);
+  assert.ok(topup.body.data.uniqueCode>=1);
+  assert.equal(topup.body.data.totalAmount,5000+topup.body.data.uniqueCode);
+  mockTxAmount=topup.body.data.totalAmount;
+  const synced=await req('/api/v1/topups/sync','POST',{},buyerTok);
+  assert.equal(synced.status,200);assert.equal(synced.body.sync.matched,1);assert.equal(synced.body.balance,8000);
+  const again=await req('/api/admin/shopee-portal/sync','POST',{},adminTok);
+  assert.equal(again.status,200);assert.equal(again.body.data.matched,0);
+  assert.equal(balanceOf(db,buyerId),8000);
+ }finally{await new Promise(resolve=>server.close(resolve));db.close();if(oldEmail===undefined)delete process.env.DITSGATE_ADMIN_EMAIL;else process.env.DITSGATE_ADMIN_EMAIL=oldEmail}
 });
 
 test('unfunded paid webhook leaves order pending and ledger untouched',async()=>{

@@ -10,12 +10,95 @@ const webhookShape=r=>({url:r?.url??null,secretConfigured:!!r?.secret_hash,creat
 const validName=s=>typeof s==='string'&&s.trim().length>=1&&s.trim().length<=100;
 const validAmount = v => Number.isSafeInteger(v) && v >= 1 && v <= 999_999_999;
 const ledgerShape = r => ({id:r.id,amount:r.amount,kind:r.kind,sourceId:r.source_id,actorId:r.actor_id,note:r.note??null,createdAt:r.created_at});
-const topupShape = r => ({id:r.id,merchantId:r.user_id,amount:r.amount,status:r.status,createdBy:r.created_by,createdAt:r.created_at,confirmedBy:r.confirmed_by,confirmedAt:r.confirmed_at,proofReference:r.proof_reference,note:r.note});
+const topupShape = r => ({id:r.id,merchantId:r.user_id,amount:r.amount,uniqueCode:r.unique_code??0,totalAmount:(r.total_amount&&r.total_amount>0)?r.total_amount:(r.amount+(r.unique_code??0)),expiresAt:r.expires_at??null,status:r.status,createdBy:r.created_by,createdAt:r.created_at,confirmedBy:r.confirmed_by,confirmedAt:r.confirmed_at,proofReference:r.proof_reference,note:r.note});
 const ticketShape=r=>({id:r.id,userId:r.user_id,transactionId:r.transaction_id??null,subject:r.subject,description:r.description,status:r.status,createdAt:r.created_at,updatedAt:r.updated_at});
 const msgShape=r=>({id:r.id,ticketId:r.ticket_id,senderId:r.sender_id,role:r.role,message:r.message,createdAt:r.created_at});
 const subOrderShape=r=>({id:r.id,userId:r.user_id,months:r.months,baseAmount:r.base_amount,uniqueCode:r.unique_code,totalAmount:r.total_amount,qrisPayload:r.qris_payload,status:r.status,createdAt:r.created_at,expiresAt:r.expires_at,paidAt:r.paid_at??null});
 const SUB_PLANS=[{months:1,baseAmount:10000},{months:2,baseAmount:20000},{months:3,baseAmount:30000},{months:5,baseAmount:40000}];
+const DEFAULT_ADMIN_WA='6282120196167';
 const getPlatformQrisPayload=(db)=>{const row=db.prepare("SELECT value FROM platform_settings WHERE key='subscription_qris_payload'").get();return row?.value?.trim()||process.env.DITSGATE_ADMIN_TOPUP_QRIS||'';};
+const getTopupMode=(db)=>{const row=db.prepare("SELECT value FROM platform_settings WHERE key='topup_mode'").get();return row?.value==='auto'?'auto':'manual';};
+const getAdminWhatsapp=(db)=>{const row=db.prepare("SELECT value FROM platform_settings WHERE key='admin_whatsapp'").get();return row?.value?.trim()||DEFAULT_ADMIN_WA;};
+const getAdminPortalConnection=(db)=>db.prepare("SELECT c.* FROM shopee_portal_connections c JOIN users u ON u.id=c.user_id WHERE u.role='admin' ORDER BY c.updated_at DESC LIMIT 1").get();
+
+export async function syncAdminShopeeTopups(db,{shopeePortalFetch=globalThis.fetch,shopeePortalKey=process.env.DITSGATE_PORTAL_ENCRYPTION_KEY,force=false}={}){
+ const mode=getTopupMode(db);
+ if(!force&&mode!=='auto')return {skipped:true,reason:'manual_mode',matched:0,checked:0};
+ const conn=getAdminPortalConnection(db);
+ if(!conn)return {skipped:true,reason:'unconfigured',matched:0,checked:0};
+ if(!force&&conn.status==='session_broken')return {skipped:true,reason:'session_broken',matched:0,checked:0};
+ const pendingTopups=db.prepare("SELECT * FROM topup_intents WHERE status='pending' ORDER BY created_at ASC").all();
+ const pendingSubs=db.prepare("SELECT * FROM subscription_orders WHERE status='pending' ORDER BY created_at ASC").all();
+ if(!force&&pendingTopups.length===0&&pendingSubs.length===0)return {skipped:true,reason:'no_pending',matched:0,checked:0};
+ const keyBuf=portalKey(shopeePortalKey);
+ if(!keyBuf||keyBuf.length!==32)throw fail(503,'Kunci enkripsi token tidak tersedia.');
+ let token;
+ try{
+  token=decryptPortalToken(keyBuf,conn.token_enc);
+ }catch{
+  db.prepare("UPDATE shopee_portal_connections SET status='session_broken',last_checked_at=?,last_error=? WHERE user_id=?").run(now(),'Kunci token portal tidak cocok atau data rusak.',conn.user_id);
+  throw fail(500,'Token portal admin tidak dapat didekripsi.');
+ }
+ let rows;
+ try{
+  rows=await readShopeePortalFeed({fetchImpl:shopeePortalFetch,token,merchantId:conn.merchant_id,storeId:conn.store_id});
+  db.prepare("UPDATE shopee_portal_connections SET status='connected',last_checked_at=?,last_error=NULL,transaction_count=? WHERE user_id=? AND token_enc=?").run(now(),rows.length,conn.user_id,conn.token_enc);
+ }catch(e){
+  if(e instanceof PortalError){
+   db.prepare("UPDATE shopee_portal_connections SET status='session_broken',last_checked_at=?,last_error=? WHERE user_id=? AND token_enc=?").run(now(),e.message,conn.user_id,conn.token_enc);
+   throw fail(e.status,e.message);
+  }
+  throw e;
+ }
+ let matched=0;
+ db.transaction(()=>{
+  const stamp=now();
+  for(const intent of pendingTopups){
+   const expectedAmount=(intent.total_amount&&intent.total_amount>0)?intent.total_amount:(intent.amount+(intent.unique_code??0));
+   const minTimeMs=Date.parse(intent.created_at)-120_000;
+   const maxTimeMs=intent.expires_at?Date.parse(intent.expires_at):(Date.parse(intent.created_at)+86_400_000);
+   const match=rows.find(r=>{
+    if(r.amountIdr!==expectedAmount)return false;
+    if(r.createdAt){
+     const txMs=Date.parse(r.createdAt);
+     if(Number.isFinite(txMs)&&(txMs<minTimeMs||txMs>maxTimeMs))return false;
+    }
+    const ref='SHOPEE-'+r.id;
+    return !db.prepare('SELECT 1 FROM topup_intents WHERE proof_reference=?').get(ref);
+   });
+   if(!match)continue;
+   const ref='SHOPEE-'+match.id;
+   const upd=db.prepare("UPDATE topup_intents SET status='admin_confirmed',confirmed_by=?,confirmed_at=?,proof_reference=?,note=? WHERE id=? AND status='pending'").run(conn.user_id,stamp,ref,`Otomatis via ShopeePay (${ref})`,intent.id);
+   if(upd.changes){
+    db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),intent.user_id,intent.amount,'admin_topup',intent.id,conn.user_id,`Topup otomatis ShopeePay (${ref})`,stamp);
+    matched++;
+   }
+  }
+  for(const ord of pendingSubs){
+   const minTimeMs=Date.parse(ord.created_at)-120_000;
+   const maxTimeMs=Date.parse(ord.expires_at);
+   const match=rows.find(r=>{
+    if(r.amountIdr!==ord.total_amount)return false;
+    if(r.createdAt){
+     const txMs=Date.parse(r.createdAt);
+     if(Number.isFinite(txMs)&&(txMs<minTimeMs||txMs>maxTimeMs))return false;
+    }
+    const ref='SHOPEE-SUB-'+r.id;
+    return !db.prepare("SELECT 1 FROM ledger_entries WHERE source_id=?").get(ref);
+   });
+   if(!match)continue;
+   const u=db.prepare('SELECT subscription_expires_at FROM users WHERE id=?').get(ord.user_id);
+   const baseMs=u?.subscription_expires_at&&Date.parse(u.subscription_expires_at)>Date.now()?Date.parse(u.subscription_expires_at):Date.now();
+   const newExpires=new Date(baseMs+ord.months*30*86_400_000).toISOString();
+   const upd=db.prepare("UPDATE subscription_orders SET status='paid',paid_at=?,confirmed_by=? WHERE id=? AND status='pending'").run(stamp,conn.user_id,ord.id);
+   if(upd.changes){
+    db.prepare('UPDATE users SET subscription_expires_at=? WHERE id=?').run(newExpires,ord.user_id);
+    matched++;
+   }
+  }
+ })();
+ return {skipped:false,checked:rows.length,matched,transactions:rows};
+}
 const merchantShape = (db,r) => {
  const txStats = db.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END),0) AS paid FROM transactions WHERE user_id=?").get(r.id);
  return {id:r.id,email:r.email,name:r.name,createdAt:r.created_at,isActive:r.is_active!==0,subscriptionExpiresAt:r.subscription_expires_at??null,balance:balanceOf(db,r.id),heldBalance:heldBalanceOf(db,r.id),transactionCount:txStats.total,paidCount:txStats.paid};
@@ -275,16 +358,34 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
  if(path==='/api/v1/topups'&&method==='GET'){
   if(!session)throw fail(401,'Sesi akun diperlukan.');
   const rows=db.prepare('SELECT * FROM topup_intents WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 100').all(owner).map(topupShape);
-  return send(res,200,{data:rows,qrisPayload:getPlatformQrisPayload(db)});
+  const mode=getTopupMode(db),conn=getAdminPortalConnection(db);
+  return send(res,200,{data:rows,qrisPayload:getPlatformQrisPayload(db),mode,listenerOnline:conn?.status==='connected',adminWhatsapp:getAdminWhatsapp(db)});
  }
  if(path==='/api/v1/topups'&&method==='POST'){
   if(!session)throw fail(401,'Sesi akun diperlukan.');
   const x=await body(req);
   const amount=Number(x.amount);
   if(!Number.isSafeInteger(amount)||amount<5000||amount>999_999_999)throw fail(400,'Minimal nominal top up adalah Rp 5.000.');
-  const id=randomUUID(),stamp=now();
-  db.prepare('INSERT INTO topup_intents (id,user_id,amount,created_by,created_at) VALUES (?,?,?,?,?)').run(id,owner,amount,owner,stamp);
-  return send(res,201,{data:topupShape(db.prepare('SELECT * FROM topup_intents WHERE id=?').get(id)),qrisPayload:getPlatformQrisPayload(db),notice:'Permintaan top up dibuat. Lakukan transfer dan tunggu konfirmasi admin.'});
+  const mode=getTopupMode(db),conn=getAdminPortalConnection(db);
+  const useUnique=mode==='auto'&&conn?.status==='connected';
+  const id=randomUUID(),stamp=now(),expiresAt=new Date(Date.now()+30*60_000).toISOString();
+  let uniqueCode=0;
+  if(useUnique){
+   const used=new Set(db.prepare("SELECT total_amount FROM topup_intents WHERE status='pending' AND (expires_at IS NULL OR expires_at>?)").all(stamp).map(r=>r.total_amount));
+   for(let c=1;c<=299;c++){if(!used.has(amount+c)){uniqueCode=c;break}}
+   if(uniqueCode===0)uniqueCode=Math.floor(Math.random()*299)+1;
+  }
+  const totalAmount=amount+uniqueCode;
+  db.prepare('INSERT INTO topup_intents (id,user_id,amount,unique_code,total_amount,expires_at,created_by,created_at) VALUES (?,?,?,?,?,?,?,?)').run(id,owner,amount,uniqueCode,totalAmount,expiresAt,owner,stamp);
+  return send(res,201,{data:topupShape(db.prepare('SELECT * FROM topup_intents WHERE id=?').get(id)),qrisPayload:getPlatformQrisPayload(db),mode,listenerOnline:conn?.status==='connected',adminWhatsapp:getAdminWhatsapp(db),notice:useUnique?'Transfer sesuai total nominal (termasuk kode unik) agar terverifikasi otomatis.':'Permintaan top up dibuat. Lakukan transfer dan konfirmasi ke admin.'});
+ }
+ if(path==='/api/v1/topups/sync'&&method==='POST'){
+  if(!session)throw fail(401,'Sesi akun diperlukan.');
+  checkRate('topup-sync:'+owner,12,60_000);
+  let syncResult={skipped:true,matched:0};
+  try{syncResult=await syncAdminShopeeTopups(db,{shopeePortalFetch,shopeePortalKey,force:false});}catch(e){syncResult={skipped:false,matched:0,error:e.message};}
+  const rows=db.prepare('SELECT * FROM topup_intents WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 100').all(owner).map(topupShape);
+  return send(res,200,{data:rows,balance:balanceOf(db,owner),sync:syncResult});
  }
  if(path==='/api/v1/subscription'&&method==='GET'){
   const u=db.prepare('SELECT subscription_expires_at FROM users WHERE id=?').get(owner);
@@ -454,16 +555,54 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
   }
   if(path==='/api/admin/settings'&&method==='GET'){
    const qrisRow=db.prepare("SELECT value,updated_at FROM platform_settings WHERE key='subscription_qris_payload'").get();
-   return send(res,200,{data:{qrisPayload:qrisRow?.value??process.env.DITSGATE_ADMIN_TOPUP_QRIS??'',updatedAt:qrisRow?.updated_at??null}});
+   const conn=getAdminPortalConnection(db);
+   return send(res,200,{data:{qrisPayload:qrisRow?.value??process.env.DITSGATE_ADMIN_TOPUP_QRIS??'',updatedAt:qrisRow?.updated_at??null,topupMode:getTopupMode(db),adminWhatsapp:getAdminWhatsapp(db),shopeePortal:{status:conn?.status??'unconfigured',storeId:conn?.store_id??null,merchantId:conn?.merchant_id??null,providerConnected:conn?.status==='connected',lastCheckedAt:conn?.last_checked_at??null,lastError:conn?.last_error??null,transactionCount:conn?.transaction_count??0}}});
   }
   if(path==='/api/admin/settings'&&method==='PUT'){
    const x=await body(req);
-   const payload=typeof x.qrisPayload==='string'?x.qrisPayload.trim():'';
-   if(payload)parseEmv(payload);
    const stamp=now();
-   if(payload)db.prepare("INSERT INTO platform_settings (key,value,updated_at) VALUES ('subscription_qris_payload',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(payload,stamp);
-   else db.prepare("DELETE FROM platform_settings WHERE key='subscription_qris_payload'").run();
-   return send(res,200,{data:{qrisPayload:payload,updatedAt:stamp}});
+   if(Object.hasOwn(x,'qrisPayload')){
+    const payload=typeof x.qrisPayload==='string'?x.qrisPayload.trim():'';
+    if(payload)parseEmv(payload);
+    if(payload)db.prepare("INSERT INTO platform_settings (key,value,updated_at) VALUES ('subscription_qris_payload',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(payload,stamp);
+    else db.prepare("DELETE FROM platform_settings WHERE key='subscription_qris_payload'").run();
+   }
+   if(Object.hasOwn(x,'topupMode')){
+    if(!['auto','manual'].includes(x.topupMode))throw fail(400,'Mode pembayaran harus auto atau manual.');
+    db.prepare("INSERT INTO platform_settings (key,value,updated_at) VALUES ('topup_mode',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(x.topupMode,stamp);
+   }
+   if(Object.hasOwn(x,'adminWhatsapp')){
+    const wa=String(x.adminWhatsapp||'').replace(/\D/g,'');
+    if(!/^62[0-9]{8,14}$/.test(wa))throw fail(400,'Nomor WhatsApp harus format 628xxx (10-16 digit).');
+    db.prepare("INSERT INTO platform_settings (key,value,updated_at) VALUES ('admin_whatsapp',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(wa,stamp);
+   }
+   const qrisRow=db.prepare("SELECT value,updated_at FROM platform_settings WHERE key='subscription_qris_payload'").get();
+   return send(res,200,{data:{qrisPayload:qrisRow?.value??'',updatedAt:qrisRow?.updated_at??stamp,topupMode:getTopupMode(db),adminWhatsapp:getAdminWhatsapp(db)}});
+  }
+  if(path==='/api/admin/shopee-portal'&&method==='POST'){
+   const x=await body(req);
+   const cfg=parsePortalConfig(x);
+   const keyBuf=portalKey(shopeePortalKey);
+   if(!keyBuf||keyBuf.length!==32)throw fail(503,'Kunci enkripsi token tidak tersedia.');
+   let verified;
+   try{verified=await probeShopeePortal({fetchImpl:shopeePortalFetch,token:cfg.token});}
+   catch(e){if(e instanceof PortalError)throw fail(e.status,e.message);throw e;}
+   const tokenEnc=encryptPortalToken(keyBuf,cfg.token);
+   const stamp=now();
+   db.prepare("INSERT INTO shopee_portal_connections (user_id,store_id,merchant_id,token_enc,status,last_checked_at,last_error,transaction_count,created_at,updated_at) VALUES (?,?,?,?,'connected',?,NULL,?,?,?) ON CONFLICT(user_id) DO UPDATE SET store_id=excluded.store_id,merchant_id=excluded.merchant_id,token_enc=excluded.token_enc,status='connected',last_checked_at=excluded.last_checked_at,last_error=NULL,transaction_count=excluded.transaction_count,updated_at=excluded.updated_at").run(owner,verified.storeId,verified.merchantId,tokenEnc,stamp,verified.rows.length,stamp,stamp);
+   let matched=0;
+   if(getTopupMode(db)==='auto'){
+    try{const s=await syncAdminShopeeTopups(db,{shopeePortalFetch,shopeePortalKey,force:true});matched=s.matched||0;}catch{}
+   }
+   return send(res,201,{data:{status:'connected',storeId:verified.storeId,merchantId:verified.merchantId,providerConnected:true,transactionCount:verified.rows.length,transactions:verified.rows,matched}});
+  }
+  if(path==='/api/admin/shopee-portal'&&method==='DELETE'){
+   db.prepare('DELETE FROM shopee_portal_connections WHERE user_id=?').run(owner);
+   return send(res,200,{ok:true});
+  }
+  if(path==='/api/admin/shopee-portal/sync'&&method==='POST'){
+   const result=await syncAdminShopeeTopups(db,{shopeePortalFetch,shopeePortalKey,force:true});
+   return send(res,200,{data:result});
   }
   if(path==='/api/admin/subscriptions'&&method==='GET'){
    const rows=db.prepare('SELECT s.*,u.name as merchant_name,u.email as merchant_email FROM subscription_orders s JOIN users u ON s.user_id=u.id ORDER BY s.created_at DESC LIMIT 100').all();

@@ -1,6 +1,6 @@
 import React,{useState,useEffect,useCallback}from'react';
 import{Link}from'react-router-dom';
-import{Activity,ArrowRight,Database,Wallet,RefreshCw,TicketCheck,CheckCircle2,XCircle,QrCode,Users,ShieldAlert,ShieldCheck,Plus,Minus,CalendarPlus,Search}from'lucide-react';
+import{Activity,ArrowRight,Database,Wallet,RefreshCw,TicketCheck,CheckCircle2,XCircle,QrCode,Users,ShieldAlert,ShieldCheck,Plus,Minus,CalendarPlus,Search,Radio,Unplug}from'lucide-react';
 import{useMerchantSession}from'./merchant-session';
 import{API_ORIGIN}from'./developer-api';
 import'./admin-operations.css';
@@ -22,7 +22,8 @@ type MerchantRow={id:string;email:string;name:string;balance:number;heldBalance?
 type LedgerRow={id:string;amount:number;kind:string;sourceId:string;note?:string|null;createdAt:string};
 type TxRow={id:string;orderId:string;amount:number;uniqueCode:number;status:string;createdAt:string;expiresAt:string;merchantName?:string;merchantEmail?:string};
 type Ticket={id:string;merchantName:string;merchantEmail:string;subject:string;status:string;createdAt:string;updatedAt:string};
-type Topup={id:string;merchantId:string;merchantName?:string;merchantEmail?:string;amount:number;status:string;note?:string|null;createdAt:string;confirmedAt?:string|null};
+type Topup={id:string;merchantId:string;merchantName?:string;merchantEmail?:string;amount:number;uniqueCode?:number;totalAmount?:number;status:string;note?:string|null;createdAt:string;confirmedAt?:string|null};
+type AdminPortalState={status:'unconfigured'|'connected'|'session_broken';storeId:string|null;merchantId:string|null;providerConnected:boolean;lastCheckedAt:string|null;lastError:string|null;transactionCount:number};
 type SubOrder={id:string;merchantName:string;merchantEmail:string;months:number;totalAmount:number;status:string;createdAt:string};
 type OverviewData={totalUsers:number;activeUsers:number;totalBalance:number;heldBalance:number;totalTransactions:number;pendingTransactions:number;paidTransactions:number;failedTransactions:number;paidVolume:number;totalFeeRevenue:number;openTickets:number;pendingSubscriptions:number;pendingTopups:number};
 
@@ -95,7 +96,7 @@ function TopupRequests({token,notify,onChanged}:{token:string;notify:(m:string)=
   <div className="table-wrap" style={{marginTop:12}}><table><thead><tr><th>User</th><th>Nominal</th><th>Status</th><th>Waktu</th><th>Aksi Admin</th></tr></thead><tbody>
    {rows.map(t=><tr key={t.id}>
     <td><b>{t.merchantName||t.merchantId.slice(0,8)}</b><br/><small>{t.merchantEmail||''}</small></td>
-    <td><b>{idr(t.amount)}</b></td>
+    <td><b>{idr(t.amount)}</b>{(t.uniqueCode??0)>0&&<small>Transfer: {idr(t.totalAmount??(t.amount+(t.uniqueCode??0)))} (+{t.uniqueCode})</small>}</td>
     <td>{t.status==='admin_confirmed'?<Badge tone="green">Disetujui</Badge>:t.status==='rejected'?<Badge tone="muted">Ditolak</Badge>:<Badge tone="amber">Menunggu</Badge>}</td>
     <td>{date(t.createdAt)}</td>
     <td>{t.status==='pending'?<div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
@@ -112,6 +113,11 @@ function TopupRequests({token,notify,onChanged}:{token:string;notify:(m:string)=
 function QrisPlatformSettings({token,notify,onChanged}:{token:string;notify:(m:string)=>void;onChanged:()=>void}){
  const[qrisPayload,setQrisPayload]=useState('');
  const[updatedAt,setUpdatedAt]=useState<string|null>(null);
+ const[topupMode,setTopupMode]=useState<'auto'|'manual'>('manual');
+ const[adminWhatsapp,setAdminWhatsapp]=useState('6282120196167');
+ const[portal,setPortal]=useState<AdminPortalState|null>(null);
+ const[portalToken,setPortalToken]=useState('');
+ const[portalBusy,setPortalBusy]=useState(false);
  const[saving,setSaving]=useState(false);
  const[subs,setSubs]=useState<SubOrder[]|null>(null);
 
@@ -121,20 +127,71 @@ function QrisPlatformSettings({token,notify,onChanged}:{token:string;notify:(m:s
     fetch(API_ORIGIN+'/api/admin/settings',{credentials:'include',headers:{Authorization:`Bearer ${token}`}}),
     fetch(API_ORIGIN+'/api/admin/subscriptions',{credentials:'include',headers:{Authorization:`Bearer ${token}`}}),
    ]);
-   if(sRes.ok){const j=await sRes.json();setQrisPayload(j.data?.qrisPayload||'');setUpdatedAt(j.data?.updatedAt||null);}
+   if(sRes.ok){
+    const j=await sRes.json();
+    setQrisPayload(j.data?.qrisPayload||'');
+    setUpdatedAt(j.data?.updatedAt||null);
+    if(j.data?.topupMode==='auto'||j.data?.topupMode==='manual')setTopupMode(j.data.topupMode);
+    if(j.data?.adminWhatsapp)setAdminWhatsapp(j.data.adminWhatsapp);
+    if(j.data?.shopeePortal)setPortal(j.data.shopeePortal);
+   }
    if(subRes.ok){const j=await subRes.json();setSubs(j.data??[]);}
   }catch{}
  },[token]);
  useEffect(()=>{void load();},[load]);
 
- const saveQris=async(e:React.FormEvent)=>{
+ const saveSettings=async(e:React.FormEvent)=>{
   e.preventDefault();setSaving(true);
   try{
-   const r=await fetch(API_ORIGIN+'/api/admin/settings',{method:'PUT',credentials:'include',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({qrisPayload})});
+   const r=await fetch(API_ORIGIN+'/api/admin/settings',{method:'PUT',credentials:'include',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({qrisPayload,topupMode,adminWhatsapp})});
    const j=await r.json();
-   if(r.ok){setUpdatedAt(j.data?.updatedAt||null);notify('QRIS DitsGate berhasil disimpan');}
-   else notify(j.error||'Payload QRIS tidak valid');
+   if(r.ok){setUpdatedAt(j.data?.updatedAt||null);notify('Pengaturan Payment Gateway & QRIS disimpan');}
+   else notify(j.error||'Pengaturan tidak valid');
   }catch{notify('Kesalahan jaringan');}finally{setSaving(false);}
+ };
+
+ const switchMode=async(nextMode:'auto'|'manual')=>{
+  setTopupMode(nextMode);
+  try{
+   const r=await fetch(API_ORIGIN+'/api/admin/settings',{method:'PUT',credentials:'include',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({topupMode:nextMode})});
+   if(r.ok)notify(nextMode==='auto'?'Mode Otomatis (ShopeePay get-transaction-list) diaktifkan':'Mode Manual (Persetujuan Admin) diaktifkan');
+   else{const j=await r.json();notify(j.error||'Gagal mengubah mode');}
+  }catch{notify('Kesalahan jaringan');}
+ };
+
+ const connectShopeePortal=async(e:React.FormEvent)=>{
+  e.preventDefault();
+  if(!portalToken.trim()){notify('Masukkan token ShopeePay Partner');return;}
+  setPortalBusy(true);
+  try{
+   const r=await fetch(API_ORIGIN+'/api/admin/shopee-portal',{method:'POST',credentials:'include',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({token:portalToken.trim()})});
+   const j=await r.json();
+   if(r.ok){
+    setPortalToken('');
+    notify(`ShopeePay terhubung (Store ${j.data?.storeId})${j.data?.matched?` · ${j.data.matched} topup terproses otomatis`:''}`);
+    await load();onChanged();
+   }else notify(j.error||'Gagal menghubungkan token ShopeePay');
+  }catch{notify('Kesalahan jaringan');}finally{setPortalBusy(false);}
+ };
+
+ const syncShopeeNow=async()=>{
+  setPortalBusy(true);
+  try{
+   const r=await fetch(API_ORIGIN+'/api/admin/shopee-portal/sync',{method:'POST',credentials:'include',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:'{}'});
+   const j=await r.json();
+   if(r.ok){
+    notify(`Sinkronisasi get-transaction-list selesai (${j.data?.checked??0} mutasi dicek, ${j.data?.matched??0} topup masuk)`);
+    await load();onChanged();
+   }else{notify(j.error||'Listener ShopeePay error/mati — disarankan pindah ke mode Manual');await load();}
+  }catch{notify('Kesalahan jaringan');}finally{setPortalBusy(false);}
+ };
+
+ const disconnectShopee=async()=>{
+  setPortalBusy(true);
+  try{
+   const r=await fetch(API_ORIGIN+'/api/admin/shopee-portal',{method:'DELETE',credentials:'include',headers:{Authorization:`Bearer ${token}`}});
+   if(r.ok){notify('Koneksi ShopeePay Partner diputuskan');await load();}
+  }catch{notify('Kesalahan jaringan');}finally{setPortalBusy(false);}
  };
 
  const confirmSub=async(id:string)=>{
@@ -145,16 +202,56 @@ function QrisPlatformSettings({token,notify,onChanged}:{token:string;notify:(m:s
   }catch{notify('Kesalahan jaringan');}
  };
 
+ const portalBadge=portal?.status==='connected'?<Badge tone="green">ShopeePay Terhubung</Badge>:portal?.status==='session_broken'?<Badge tone="amber">Listener Mati / Sesi Putus</Badge>:<Badge tone="muted">Belum Terhubung</Badge>;
+
  return <section className="card admin-ops-manage">
   <div className="admin-ops-heading">
-   <div><h2><QrCode size={18} style={{verticalAlign:'text-bottom',marginRight:6}}/>Pengaturan QRIS DitsGate &amp; Langganan</h2><p>Payload QRIS statis EMVCo milik DitsGate untuk pembayaran paket langganan merchant.</p></div>
+   <div><h2><QrCode size={18} style={{verticalAlign:'text-bottom',marginRight:6}}/>Admin Payment Gateway (Manual / Otomatis) &amp; QRIS</h2><p>Atur verifikasi top up otomatis via ShopeePay <code>get-transaction-list</code> atau mode manual saat listener mati.</p></div>
    {updatedAt&&<small className="muted">Diperbarui: {date(updatedAt)}</small>}
   </div>
-  <form onSubmit={saveQris} className="stack" style={{marginBottom:16}}>
+
+  <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',margin:'14px 0',padding:12,background:'var(--surface)',borderRadius:10}}>
+   <strong>Mode Top Up:</strong>
+   <button type="button" className={'button '+(topupMode==='auto'?'primary':'secondary')} onClick={()=>void switchMode('auto')}>Otomatis (ShopeePay Listener)</button>
+   <button type="button" className={'button '+(topupMode==='manual'?'primary':'secondary')} onClick={()=>void switchMode('manual')}>Manual (Konfirmasi Admin)</button>
+   {portalBadge}
+  </div>
+
+  <div style={{padding:14,border:'1px solid var(--border)',borderRadius:10,marginBottom:16}}>
+   <div className="admin-ops-heading">
+    <div>
+     <h3 style={{margin:0}}><Radio size={15} style={{verticalAlign:'text-bottom',marginRight:6}}/>ShopeePay Partner Listener (<code>get-transaction-list</code>)</h3>
+     <small className="muted">
+      {portal?.status==='connected'
+       ?`Store ID: ${portal.storeId} · Merchant ID: ${portal.merchantId} · ${portal.transactionCount} mutasi terbaca${portal.lastCheckedAt?` · Dicek ${date(portal.lastCheckedAt)}`:''}`
+       :portal?.status==='session_broken'
+        ?`Sesi putus: ${portal.lastError||'Token kedaluwarsa'}. Hubungkan ulang token atau ubah ke Mode Manual.`
+        :'Tempel token portal partner.shopee.co.id untuk mengaktifkan pengecekan mutasi masuk otomatis.'}
+     </small>
+    </div>
+    <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+     {portal?.status&&portal.status!=='unconfigured'&&<>
+      <button type="button" className="button secondary" onClick={()=>void syncShopeeNow()} disabled={portalBusy}><RefreshCw size={14}/> Sinkronkan Sekarang</button>
+      <button type="button" className="button secondary" onClick={()=>void disconnectShopee()} disabled={portalBusy}><Unplug size={14}/> Putuskan</button>
+     </>}
+    </div>
+   </div>
+   <form onSubmit={connectShopeePortal} className="admin-ops-form" style={{marginTop:10}}>
+    <label style={{flex:'1 1 320px'}}>Token Portal ShopeePay Partner
+     <input type="password" value={portalToken} onChange={e=>setPortalToken(e.target.value)} placeholder="Tempel token partner.shopee.co.id di sini..."/>
+    </label>
+    <button type="submit" className="button primary" disabled={portalBusy}>{portalBusy?'Menghubungkan...':'Hubungkan Listener ShopeePay'}</button>
+   </form>
+  </div>
+
+  <form onSubmit={saveSettings} className="stack" style={{marginBottom:16}}>
+   <label>Nomor WhatsApp Admin (untuk tombol hubungi admin saat menunggu)
+    <input value={adminWhatsapp} onChange={e=>setAdminWhatsapp(e.target.value)} placeholder="6282120196167"/>
+   </label>
    <label>Payload String QRIS EMVCo (dimulai dengan 000201...)
     <textarea rows={3} value={qrisPayload} onChange={e=>setQrisPayload(e.target.value)} placeholder="000201010211..." style={{fontFamily:'monospace',fontSize:12}}/>
    </label>
-   <div className="row-actions"><button className="button primary" type="submit" disabled={saving}>{saving?'Menyimpan...':'Simpan QRIS DitsGate'}</button></div>
+   <div className="row-actions"><button className="button primary" type="submit" disabled={saving}>{saving?'Menyimpan...':'Simpan Pengaturan Gateway & QRIS'}</button></div>
   </form>
   <h3>Order Langganan Merchant</h3>
   {subs===null?<p>Memuat…</p>:subs.length===0?<p className="admin-ops-empty">Belum ada order langganan.</p>:

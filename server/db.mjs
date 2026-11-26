@@ -52,6 +52,9 @@ export function openDatabase(file) {
   db.exec(`CREATE TABLE IF NOT EXISTS topup_intents (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
       amount INTEGER NOT NULL CHECK(amount > 0 AND amount <= 999999999),
+      unique_code INTEGER NOT NULL DEFAULT 0,
+      total_amount INTEGER NOT NULL DEFAULT 0,
+      expires_at TEXT,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','admin_confirmed','rejected')),
       created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
       confirmed_by TEXT REFERENCES users(id), confirmed_at TEXT,
@@ -179,6 +182,13 @@ export function openDatabase(file) {
       CREATE INDEX IF NOT EXISTS topup_owner ON topup_intents(user_id,created_at);
       COMMIT;`);
   }
+  const topupCols = db.prepare('PRAGMA table_info(topup_intents)').all().map(c => c.name);
+  if (!topupCols.includes('unique_code')) db.exec('ALTER TABLE topup_intents ADD COLUMN unique_code INTEGER NOT NULL DEFAULT 0');
+  if (!topupCols.includes('total_amount')) {
+    db.exec('ALTER TABLE topup_intents ADD COLUMN total_amount INTEGER NOT NULL DEFAULT 0');
+    db.exec('UPDATE topup_intents SET total_amount = amount + unique_code WHERE total_amount = 0');
+  }
+  if (!topupCols.includes('expires_at')) db.exec('ALTER TABLE topup_intents ADD COLUMN expires_at TEXT');
   const portalCols = db.prepare('PRAGMA table_info(shopee_portal_connections)').all().map(c => c.name);
   const portalSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='shopee_portal_connections'").get()?.sql ?? '';
   if (portalSchema.includes("'disconnected'")) {
