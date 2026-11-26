@@ -219,19 +219,23 @@ function Overview(p:Props&{open:()=>void;serverBalance:number|null}){
   const headers:Record<string,string>=merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{};
   const opts={credentials:'include' as const,headers};
   try{
-   const[txR,ledR,qR,pR,lR,kR,wR]=await Promise.all([
+   const[txR,ledR,qR,pR,lR,cR,kR,wR]=await Promise.all([
     fetch(API_ORIGIN+'/api/v1/transactions',opts).then(r=>r.ok?r.json():null).catch(()=>null),
     fetch(API_ORIGIN+'/api/v1/ledger',opts).then(r=>r.ok?r.json():null).catch(()=>null),
     fetch(API_ORIGIN+'/api/v1/qris',opts).then(r=>r.ok?r.json():null).catch(()=>null),
     fetch(API_ORIGIN+'/api/v1/shopee-portal',opts).then(r=>r.ok?r.json():null).catch(()=>null),
     fetch(API_ORIGIN+'/api/v1/shopee-listener',opts).then(r=>r.ok?r.json():null).catch(()=>null),
+    fetch(API_ORIGIN+'/api/v1/connectors',opts).then(r=>r.ok?r.json():null).catch(()=>null),
     fetch(API_ORIGIN+'/api/v1/api-keys',opts).then(r=>r.ok?r.json():null).catch(()=>null),
     fetch(API_ORIGIN+'/api/v1/webhook-settings',opts).then(r=>r.ok?r.json():null).catch(()=>null),
    ]);
    if(Array.isArray(txR?.data))setServerTx(txR.data.map((r:any)=>({id:r.id,orderId:r.orderId,amount:r.amount,uniqueCode:r.uniqueCode,method:'QRIS',status:r.status,createdAt:r.createdAt,expiresAt:r.expiresAt,description:'',customer:''})));
    if(Array.isArray(ledR?.data))setServerLedger(ledR.data);
    if(qR)setHasQris(Array.isArray(qR.data)&&qR.data.length>0);
-   if(pR||lR)setHasDetector(pR?.data?.status==='connected'||lR?.data?.status==='receiving'||lR?.data?.status==='awaiting_event');
+   if(pR||lR||cR){
+    const anyConn=Object.values(cR?.data||{}).some((x:any)=>x?.status==='connected');
+    setHasDetector(pR?.data?.status==='connected'||lR?.data?.status==='receiving'||lR?.data?.status==='awaiting_event'||anyConn);
+   }
    if(kR)setHasKey(Array.isArray(kR.data)&&kR.data.some((k:any)=>!k.revokedAt));
    if(wR)setHasWebhook(Boolean(wR.data?.url));
   }catch{}
@@ -325,30 +329,36 @@ function Detectors(p:Props){
  const merchant=useMerchantSession();
  const[portal,setPortal]=useState<{status:string;lastCheckedAt:string|null}|null>(null);
  const[listener,setListener]=useState<{status:string;lastSeenAt:string|null}|null>(null);
+ const[connectors,setConnectors]=useState<Record<string,{status:string;accountLabel?:string;lastCheckedAt?:string|null}>>({});
  useEffect(()=>{
-  if(!merchant?.token){setPortal(null);setListener(null);return;}
+  if(!merchant?.token){setPortal(null);setListener(null);setConnectors({});return;}
   let cancelled=false;
   const headers:Record<string,string>=merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{};
   void Promise.all([
    fetch(API_ORIGIN+'/api/v1/shopee-portal',{credentials:'include',headers}).then(r=>r.ok?r.json():null).catch(()=>null),
    fetch(API_ORIGIN+'/api/v1/shopee-listener',{credentials:'include',headers}).then(r=>r.ok?r.json():null).catch(()=>null),
-  ]).then(([pRes,lRes])=>{
+   fetch(API_ORIGIN+'/api/v1/connectors',{credentials:'include',headers}).then(r=>r.ok?r.json():null).catch(()=>null),
+  ]).then(([pRes,lRes,cRes])=>{
    if(cancelled)return;
    if(pRes?.data)setPortal(pRes.data);
    if(lRes?.data)setListener(lRes.data);
+   if(cRes?.data)setConnectors(cRes.data);
   });
   return()=>{cancelled=true};
  },[merchant?.token]);
  const cardStatus=(id:string)=>{
-  if(!merchant)return{label:'Belum terhubung',tone:'muted',detail:'Masuk akun merchant untuk cek status'};
+  if(!merchant)return{label:'Belum terhubung',tone:'muted',detail:'Masuk akun untuk cek status'};
   if(id==='shopee'){
    if(portal?.status==='connected')return{label:'Terhubung',tone:'green',detail:portal.lastCheckedAt?`Cek terakhir: ${date(portal.lastCheckedAt)}`:'Portal aktif'};
    if(portal?.status==='session_broken')return{label:'Sesi berakhir',tone:'amber',detail:'Hubungkan ulang token portal'};
    return{label:'Belum terhubung',tone:'muted',detail:'Token portal belum terpasang'};
   }
+  const conn=connectors[id];
+  if(conn?.status==='connected')return{label:'Terhubung',tone:'green',detail:conn.accountLabel?`Terhubung · ${conn.accountLabel}`:'Konektor aktif'};
+  if(conn?.status==='awaiting_otp')return{label:'Menunggu OTP',tone:'amber',detail:'Masukkan kode OTP GoBiz'};
   if(listener?.status==='receiving')return{label:'Sinyal diterima',tone:'green',detail:listener.lastSeenAt?`Sinyal terakhir: ${date(listener.lastSeenAt)}`:'Listener aktif'};
   if(listener?.status==='awaiting_event')return{label:'Menunggu sinyal',tone:'blue',detail:'Perangkat listener terpasang'};
-  return{label:'Belum terhubung',tone:'muted',detail:'Pasangkan Android listener'};
+  return{label:'Belum aktif',tone:'muted',detail:id==='listener'?'Pasangkan Android listener':'Hubungkan API / OTP atau Android listener'};
  };
  return <><Head title="Detektor Pembayaran" desc="Sumber notifikasi dan pembacaan mutasi pembayaran merchant."/><div className="provider-grid">{providers.map((v,idx)=>{const st=cardStatus(v.id);return <motion.div key={v.id} initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{duration:0.25,delay:idx*0.04}} whileHover={{y:-2}}><Link className="card provider-card" to={'/dashboard/detectors/'+v.id}><span className="provider-icon" style={{background:'transparent',padding:0}}><ProviderIcon id={v.id} size={34}/></span><div><h2>{v.name}</h2><p>{st.detail}</p><Badge tone={st.tone}>{st.label}</Badge></div><ChevronRight size={17}/></Link></motion.div>})}</div><div className="info-line">Shopee Partner membaca mutasi langsung dari portal; GoPay, BCA, LinkAja, BRI, Mandiri, dan Aplikasi Listener menerima sinyal notifikasi dari Android Listener.</div></>;
 }

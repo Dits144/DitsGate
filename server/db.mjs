@@ -111,6 +111,18 @@ export function openDatabase(file) {
      created_at TEXT NOT NULL,
      updated_at TEXT NOT NULL
    );
+   CREATE TABLE IF NOT EXISTS provider_connectors (
+     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     provider TEXT NOT NULL CHECK(provider IN ('gopay','bca','linkaja','bri','mandiri')),
+     account_label TEXT NOT NULL DEFAULT '',
+     credential_enc TEXT NOT NULL DEFAULT '',
+     status TEXT NOT NULL DEFAULT 'unconfigured' CHECK(status IN ('unconfigured','awaiting_otp','connected','session_broken')),
+     last_checked_at TEXT,
+     last_error TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL,
+     PRIMARY KEY (user_id, provider)
+   );
   `);
   // Support tickets & messages
   db.exec(`CREATE TABLE IF NOT EXISTS support_tickets (

@@ -402,6 +402,103 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
     db.prepare('DELETE FROM shopee_portal_connections WHERE user_id=?').run(owner);
     return send(res,200,{ok:true});
   }
+  if(path==='/api/v1/connectors'&&method==='GET'){
+   if(!session)throw fail(401,'Sesi diperlukan.');
+   const rows=db.prepare('SELECT provider,account_label,status,last_checked_at,last_error,updated_at FROM provider_connectors WHERE user_id=?').all(owner);
+   const map=Object.fromEntries(rows.map(r=>[r.provider,{provider:r.provider,accountLabel:r.account_label,status:r.status,lastCheckedAt:r.last_checked_at,lastError:r.last_error,updatedAt:r.updated_at}]));
+   return send(res,200,{data:map});
+  }
+  if(path==='/api/v1/connectors/gopay/otp'&&method==='POST'){
+   if(!session)throw fail(401,'Sesi diperlukan.');
+   const x=await body(req);
+   const digitsPhone=String(x.phone||'').replace(/\D/g,'');
+   const phone=digitsPhone.startsWith('0')?'+62'+digitsPhone.slice(1):digitsPhone.startsWith('62')?'+'+digitsPhone:'';
+   if(!/^\+628[0-9]{7,13}$/.test(phone))throw fail(400,'Masukkan nomor HP GoBiz yang valid (contoh: 08123456789).');
+   const keyBuf=portalKey(shopeePortalKey);
+   if(!keyBuf||keyBuf.length!==32)throw fail(503,'Kunci enkripsi server tidak tersedia.');
+   let otpToken='';
+   try{
+    const gobizRes=await fetch('https://api.gobiz.co.id/goid/otp',{
+     method:'POST',
+     headers:{'Content-Type':'application/json','Accept':'application/json','X-AppVersion':'4.51.0','X-Platform':'Android'},
+     body:JSON.stringify({client_id:'go-biz-web-new',phone_number:phone,channel_type:'sms'}),
+     signal:AbortSignal.timeout(10000),
+    });
+    const gobizJson=await gobizRes.json().catch(()=>({}));
+    if(!gobizRes.ok){
+     const msg=gobizJson?.errors?.[0]?.message||gobizJson?.message||`GoBiz menolak permintaan OTP (${gobizRes.status}).`;
+     throw fail(gobizRes.status>=500?502:400,msg);
+    }
+    otpToken=String(gobizJson?.data?.otp_token||gobizJson?.otp_token||'');
+    if(!otpToken)throw fail(502,'Respons OTP GoBiz tidak menyertakan otp_token.');
+   }catch(e){
+    if(e?.status)throw e;
+    throw fail(502,'Tidak dapat menghubungi API GoBiz. Periksa koneksi atau gunakan Android Listener.');
+   }
+   const credEnc=encryptPortalToken(keyBuf,JSON.stringify({phone,otpToken}));
+   const stamp=now();
+   db.prepare("INSERT INTO provider_connectors (user_id,provider,account_label,credential_enc,status,last_checked_at,last_error,created_at,updated_at) VALUES (?,'gopay',?,?,'awaiting_otp',?,NULL,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET account_label=excluded.account_label,credential_enc=excluded.credential_enc,status='awaiting_otp',last_checked_at=excluded.last_checked_at,last_error=NULL,updated_at=excluded.updated_at").run(owner,phone,credEnc,stamp,stamp,stamp);
+   return send(res,200,{data:{provider:'gopay',status:'awaiting_otp',accountLabel:phone,lastCheckedAt:stamp,message:'Kode OTP telah dikirim ke SMS/WhatsApp GoBiz Anda.'}});
+  }
+  if(path==='/api/v1/connectors/gopay/verify'&&method==='POST'){
+   if(!session)throw fail(401,'Sesi diperlukan.');
+   const x=await body(req);
+   const otp=String(x.otp||'').replace(/\D/g,'');
+   if(!/^[0-9]{4,8}$/.test(otp))throw fail(400,'Kode OTP harus 4–8 digit angka.');
+   const row=db.prepare("SELECT * FROM provider_connectors WHERE user_id=? AND provider='gopay'").get(owner);
+   if(!row||!row.credential_enc)throw fail(400,'Kirim OTP ke nomor GoBiz terlebih dahulu.');
+   const keyBuf=portalKey(shopeePortalKey);
+   if(!keyBuf||keyBuf.length!==32)throw fail(503,'Kunci enkripsi server tidak tersedia.');
+   let parsed;
+   try{parsed=JSON.parse(decryptPortalToken(keyBuf,row.credential_enc));}catch{throw fail(500,'Sesi OTP kedaluwarsa. Kirim ulang OTP.');}
+   let tokenData;
+   try{
+    const gobizRes=await fetch('https://api.gobiz.co.id/goid/token',{
+     method:'POST',
+     headers:{'Content-Type':'application/json','Accept':'application/json','X-AppVersion':'4.51.0','X-Platform':'Android'},
+     body:JSON.stringify({client_id:'go-biz-web-new',grant_type:'otp',data:{otp,otp_token:parsed.otpToken}}),
+     signal:AbortSignal.timeout(10000),
+    });
+    const gobizJson=await gobizRes.json().catch(()=>({}));
+    if(!gobizRes.ok){
+     const msg=gobizJson?.errors?.[0]?.message||gobizJson?.message||`Verifikasi OTP GoBiz gagal (${gobizRes.status}).`;
+     throw fail(gobizRes.status>=500?502:400,msg);
+    }
+    tokenData={phone:parsed.phone,accessToken:gobizJson.access_token,refreshToken:gobizJson.refresh_token};
+   }catch(e){
+    if(e?.status)throw e;
+    throw fail(502,'Gagal menghubungi server GoBiz saat verifikasi OTP.');
+   }
+   const credEnc=encryptPortalToken(keyBuf,JSON.stringify(tokenData));
+   const stamp=now();
+   db.prepare("UPDATE provider_connectors SET credential_enc=?,status='connected',last_checked_at=?,last_error=NULL,updated_at=? WHERE user_id=? AND provider='gopay'").run(credEnc,stamp,stamp,owner);
+   return send(res,200,{data:{provider:'gopay',status:'connected',accountLabel:row.account_label,lastCheckedAt:stamp}});
+  }
+  const connProvider=/^\/api\/v1\/connectors\/(gopay|bca|linkaja|bri|mandiri)$/.exec(path)?.[1];
+  if(connProvider){
+   if(!session)throw fail(401,'Sesi diperlukan.');
+   if(method==='GET'){
+    const r=db.prepare('SELECT provider,account_label,status,last_checked_at,last_error,updated_at FROM provider_connectors WHERE user_id=? AND provider=?').get(owner,connProvider);
+    return send(res,200,{data:r?{provider:r.provider,accountLabel:r.account_label,status:r.status,lastCheckedAt:r.last_checked_at,lastError:r.last_error,updatedAt:r.updated_at}:{provider:connProvider,accountLabel:'',status:'unconfigured',lastCheckedAt:null,lastError:null}});
+   }
+   if(method==='POST'){
+    if(connProvider==='gopay')throw fail(400,'Gunakan endpoint OTP GoBiz untuk menghubungkan GoPay Merchant.');
+    const x=await body(req);
+    const label=typeof x.accountLabel==='string'?x.accountLabel.trim():'';
+    const secret=typeof x.secret==='string'?x.secret.trim():'';
+    if(!label||label.length>120||!secret||secret.length<4||secret.length>4000)throw fail(400,'ID akun / username dan kredensial atau token wajib diisi.');
+    const keyBuf=portalKey(shopeePortalKey);
+    if(!keyBuf||keyBuf.length!==32)throw fail(503,'Kunci enkripsi server tidak tersedia.');
+    const credEnc=encryptPortalToken(keyBuf,JSON.stringify({accountLabel:label,secret}));
+    const stamp=now();
+    db.prepare("INSERT INTO provider_connectors (user_id,provider,account_label,credential_enc,status,last_checked_at,last_error,created_at,updated_at) VALUES (?,?,?,?,'connected',?,NULL,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET account_label=excluded.account_label,credential_enc=excluded.credential_enc,status='connected',last_checked_at=excluded.last_checked_at,last_error=NULL,updated_at=excluded.updated_at").run(owner,connProvider,label,credEnc,stamp,stamp,stamp);
+    return send(res,200,{data:{provider:connProvider,status:'connected',accountLabel:label,lastCheckedAt:stamp}});
+   }
+   if(method==='DELETE'){
+    db.prepare('DELETE FROM provider_connectors WHERE user_id=? AND provider=?').run(owner,connProvider);
+    return send(res,200,{ok:true});
+   }
+  }
   if(path==='/api/v1/api-keys' || path.startsWith('/api/v1/api-keys/') || path.startsWith('/api/v1/webhook-settings')){
   if(!session)throw fail(401,'Sesi akun diperlukan.');
   if(path==='/api/v1/api-keys'&&method==='GET')return send(res,200,{data:db.prepare('SELECT * FROM merchant_api_keys WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 100').all(owner).map(keyShape)});
