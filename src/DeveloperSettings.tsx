@@ -103,8 +103,6 @@ export default function DeveloperSettings({ notify }: Props) {
   const [qris, setServerQris] = useState<SandboxQris[]>([]);
   const [listener, setListener] = useState<ListenerInfo | null>(null);
   const [serverUrl, setServerUrl] = useState('');
-  const [showNewKeyForm, setShowNewKeyForm] = useState(false);
-  const [keyName, setKeyName] = useState('');
   const [editing, setEditing] = useState<Record<string, { name: string; webhookUrl: string; qrisId: string }>>({});
   const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
   const [showSecretText, setShowSecretText] = useState(false);
@@ -207,19 +205,16 @@ export default function DeveloperSettings({ notify }: Props) {
     };
   }, [token]);
 
-  function generate(e: React.FormEvent) {
-    e.preventDefault();
-    if (!keyName.trim()) return;
+  function generateNow() {
+    const autoName = `API Key ${keys.length + 1}`;
     void run(async () => {
       const result = await sandboxRequest<{ data: SandboxKey; key: string }>(
         API_ORIGIN,
         '/api/v1/api-keys',
         'POST',
         token,
-        { name: keyName.trim() },
+        { name: autoName },
       );
-      setKeyName('');
-      setShowNewKeyForm(false);
       setKeys((v) => [result.data, ...v]);
       setEditing((v) => ({ ...v, [result.data.id]: { name: result.data.name, webhookUrl: '', qrisId: '' } }));
       showKeyOnce('API Key Baru', result.key);
@@ -354,37 +349,16 @@ export default function DeveloperSettings({ notify }: Props) {
               disabled={busy}
               onClick={() => {
                 if (!token) {
-                  notify('Silakan masuk ke akun merchant terlebih dahulu.');
+                  notify('Silakan masuk terlebih dahulu.');
                   nav('/login');
                   return;
                 }
-                setShowNewKeyForm((v) => !v);
+                generateNow();
               }}
             >
-              Generate API Key Baru
+              {busy ? 'Membuat Key…' : 'Generate API Key Baru'}
             </button>
           </div>
-
-          {token && showNewKeyForm && (
-            <form onSubmit={generate} className="dev-connect-form">
-              <label>
-                Nama Key
-                <input
-                  required
-                  maxLength={100}
-                  value={keyName}
-                  onChange={(e) => setKeyName(e.target.value)}
-                  placeholder="Contoh: Live Key 1"
-                />
-              </label>
-              <button type="submit" className="dev-primary" disabled={busy}>
-                Buat Key
-              </button>
-              <button type="button" className="dev-secondary" onClick={() => setShowNewKeyForm(false)}>
-                Batal
-              </button>
-            </form>
-          )}
 
           <div className="table-wrap" style={{ marginTop: '14px' }}>
             <table>

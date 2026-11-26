@@ -248,8 +248,7 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
   return send(res,200,{user:{id:u.id,email:u.email,name:u.name,role:u.role}});
  }
  if(path==='/api/v1/shopeepay/config'||path==='/api/v1/shopeepay/check'){
-  if(!session)throw fail(401,'Sesi merchant diperlukan.');
-  if(db.prepare('SELECT role FROM users WHERE id=?').get(owner)?.role!=='merchant')throw fail(403,'Akun merchant diperlukan.');
+  if(!session)throw fail(401,'Sesi diperlukan.');
   if(path==='/api/v1/shopeepay/config'&&method==='GET')return send(res,200,{data:shopeepayConfig(process.env)});
   if(path==='/api/v1/shopeepay/check'&&method==='POST'){
    const x=await body(req);
@@ -262,8 +261,7 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
   throw fail(404,'Endpoint tidak ditemukan.');
  }
  if(path==='/api/v1/shopee-listener'||path==='/api/v1/shopee-listener/events'){
-  if(!session)throw fail(401,'Sesi merchant diperlukan.');
-  if(db.prepare('SELECT role FROM users WHERE id=?').get(owner)?.role!=='merchant')throw fail(403,'Akun merchant diperlukan.');
+  if(!session)throw fail(401,'Sesi diperlukan.');
   const device=db.prepare('SELECT * FROM shopee_listener_devices WHERE user_id=?').get(owner);
   const state=()=>({status:device?(device.last_seen_at?'receiving':'awaiting_event'):'unconfigured',providerConnected:false,source:'android_listener',lastSeenAt:device?.last_seen_at??null,createdAt:device?.created_at??null});
   if(path==='/api/v1/shopee-listener/events'&&method==='GET'){
@@ -346,7 +344,6 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
   }
   if(path==='/api/v1/api-keys' || path.startsWith('/api/v1/api-keys/') || path.startsWith('/api/v1/webhook-settings')){
   if(!session)throw fail(401,'Sesi akun diperlukan.');
-  if(db.prepare('SELECT role FROM users WHERE id=?').get(owner)?.role!=='merchant')throw fail(403,'Akun merchant diperlukan.');
   if(path==='/api/v1/api-keys'&&method==='GET')return send(res,200,{data:db.prepare('SELECT * FROM merchant_api_keys WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 100').all(owner).map(keyShape)});
   if(path==='/api/v1/api-keys'&&method==='POST'){
    const x=await body(req);

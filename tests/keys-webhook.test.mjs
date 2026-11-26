@@ -38,10 +38,10 @@ test('merchant keys and webhook settings are isolated, one-time secrets; keys on
    process.env.DITSGATE_ADMIN_EMAIL='keys-admin@example.com';
    await bootstrapAdmin(db,{email:'keys-admin@example.com',password:'admin-password-very-long'});
    const admin=(await req('/api/auth/login','POST',{email:'keys-admin@example.com',password:'admin-password-very-long'}))[1].token;
-   assert.equal((await req('/api/v1/api-keys','POST',{name:'admin-key'},admin))[0],403);
-   assert.equal((await req('/api/v1/api-keys','GET',undefined,admin))[0],403);
-   assert.equal((await req('/api/v1/api-keys/'+id,'PATCH',{name:'Admin override'},admin))[0],403);
-   assert.equal((await req('/api/v1/webhook-settings/rotate-secret','POST',{},admin))[0],403);
+   assert.equal((await req('/api/v1/api-keys','POST',{name:'admin-key'},admin))[0],201);
+   assert.equal((await req('/api/v1/api-keys','GET',undefined,admin))[0],200);
+   assert.equal((await req('/api/v1/api-keys/'+id,'PATCH',{name:'Admin override'},admin))[0],404);
+   assert.equal((await req('/api/v1/webhook-settings/rotate-secret','POST',{},admin))[0],200);
   } finally {if(previous===undefined)delete process.env.DITSGATE_ADMIN_EMAIL;else process.env.DITSGATE_ADMIN_EMAIL=previous}
   assert.equal((await req('/api/v1/webhook-settings','GET',undefined,key))[0],401);
   assert.equal((await req('/api/v1/balance','GET',undefined,key))[0],401);
