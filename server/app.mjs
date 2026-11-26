@@ -5,7 +5,7 @@ import { openDatabase, balanceOf, heldBalanceOf, settleTxInTx, expireOverdueInTx
 import { validateWebhookUrl, deliverWebhook } from './outbound-webhook.mjs';
 import { shopeepayConfig } from './shopeepay.mjs';
 import { parsePortalConfig, portalKey, encryptPortalToken, decryptPortalToken, probeShopeePortal, readShopeePortalFeed, PortalError } from './shopee-portal.mjs';
-import { notifyPortalBroken } from './mailer.mjs';
+import { notifyPortalBroken, notifyLowBalance } from './mailer.mjs';
 const keyShape=r=>({id:r.id,name:r.name,prefix:r.prefix,webhookUrl:r.webhook_url,qrisId:r.qris_id,createdAt:r.created_at,lastUsedAt:r.last_used_at,revokedAt:r.revoked_at,environment:'production',deliveryEnabled:true});
 const webhookShape=r=>({url:r?.url??null,secretConfigured:!!r?.secret_hash,createdAt:r?.created_at??null,updatedAt:r?.updated_at??null,deliveryEnabled:true});
 const validName=s=>typeof s==='string'&&s.trim().length>=1&&s.trim().length<=100;
@@ -787,7 +787,12 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
   try{
    const result=db.transaction(()=>{
     expireOverdueInTx(db,owner);
-    if(balanceOf(db,owner)<TX_FEE)throw fail(409,`Saldo biaya tidak mencukupi (minimal Rp ${TX_FEE} ditahan untuk membuat transaksi).`);
+    const curBalance=balanceOf(db,owner);
+    if(curBalance<TX_FEE){
+     const u=db.prepare('SELECT email,name FROM users WHERE id=?').get(owner);
+     if(u?.email)void notifyLowBalance({to:u.email,name:u.name,balance:curBalance,required:TX_FEE,orderId}).catch(()=>{});
+     throw fail(409,`Saldo biaya tidak mencukupi (minimal Rp ${TX_FEE} ditahan untuk membuat transaksi).`);
+    }
     db.prepare('INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?)').run(id,owner,orderId,x.amount,unique,asset.id,'pending',stamp,expiresAt);
     db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),owner,-TX_FEE,'tx_hold',id,owner,`Saldo ditahan untuk transaksi · ${orderId}`,stamp);
     return {data:txShape(db.prepare('SELECT * FROM transactions WHERE id=?').get(id),qrisPayload),balance:balanceOf(db,owner),heldBalance:heldBalanceOf(db,owner),feeHeld:TX_FEE};

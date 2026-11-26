@@ -243,7 +243,14 @@ export function settleTxInTx(db, tx, nextStatus, actorId = null, customNote = ''
   }
   const updated = db.prepare("UPDATE transactions SET status=? WHERE id=? AND status='pending'").run(nextStatus, tx.id);
   if (!updated.changes) return false;
-  if (nextStatus !== 'paid') {
+  if (nextStatus === 'paid') {
+    const held = db.prepare("SELECT 1 FROM ledger_entries WHERE kind='tx_hold' AND source_id=?").get(tx.id);
+    const paidFee = db.prepare("SELECT 1 FROM ledger_entries WHERE kind='paid_order_fee' AND source_id=?").get(tx.id);
+    if (!held && !paidFee) {
+      db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(randomUUID(), tx.user_id, -TX_FEE, 'paid_order_fee', tx.id, actorId, customNote || `Biaya transaksi berhasil · ${tx.order_id}`, new Date().toISOString());
+    }
+  } else {
     const held = db.prepare("SELECT 1 FROM ledger_entries WHERE kind='tx_hold' AND source_id=?").get(tx.id);
     const refunded = db.prepare("SELECT 1 FROM ledger_entries WHERE kind='tx_refund' AND source_id=?").get(tx.id);
     if (held && !refunded) {
