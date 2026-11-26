@@ -18,6 +18,10 @@ import {useMerchantSession,signInMerchant,registerMerchant,signOutMerchant,resto
 import {API_ORIGIN} from './developer-api';
 import {useParams as useDetectorParams} from 'react-router-dom';
 import ProviderDetector, {type DetectorProviderId} from './ProviderDetector';
+import {ProviderIcon} from './ProviderIcon';
+import {motion} from 'framer-motion';
+import gsap from 'gsap';
+import Lenis from 'lenis';
 
 function DetectorRoute(){
  const {id}=useDetectorParams();
@@ -79,10 +83,10 @@ function CreatePayment({s,set,notify,close,onRefreshBalance}:{s:DemoState;set:Se
  return <Modal title="Buat Pembayaran" close={close}><form onSubmit={submit}><div className="form-grid"><label>Order ID eksternal <input required value={orderId} onChange={e=>order(e.target.value)} placeholder="ORDER-001"/></label><label>Nominal (minimal Rp 1.000) <input required type="number" min="1000" step="1" value={amount} onChange={e=>amt(e.target.value)} placeholder="50000"/></label><label>Metode <select value={method} onChange={e=>met(e.target.value)}><option>QRIS</option><option>Transfer Bank</option></select></label><label>Berlaku selama <select value={expiration} onChange={e=>exp(Number(e.target.value))}><option value={15}>15 menit</option><option value={30}>30 menit</option><option value={60}>60 menit</option><option value={1440}>24 jam</option></select></label><label className="full">Deskripsi (opsional)<input value={description} onChange={e=>desc(e.target.value)} placeholder="Pembelian produk"/></label><label className="full">Referensi pelanggan (opsional)<input value={customer} onChange={e=>cust(e.target.value)} placeholder="CUST-001"/></label></div>{error&&<p className="error" role="alert">{error}</p>}<div className="info-line">Biaya platform Rp 100 ditahan saat transaksi dibuat; dikembalikan otomatis jika gagal/batal/kedaluwarsa.</div><div className="modal-actions"><button type="button" className="button secondary" onClick={close}>Batal</button><button className="button primary" type="submit" disabled={busy}>{busy?'Memproses...':'Buat Order'}</button></div></form></Modal>;
 }
 
-type NavItem=[string,string,typeof LayoutDashboard];
+type NavItem=[string,string,typeof LayoutDashboard,string?];
 const sections:{label:string;items:NavItem[]}[]=[
  {label:'UTAMA',items:[['/dashboard','Dashboard',LayoutDashboard],['/dashboard/qris','QRIS Saya',QrCode],['/dashboard/integration-guide','Panduan Integrasi',BookOpen],['/dashboard/detectors','Detektor Pembayaran',Radio]]},
- {label:'PROVIDER DETECTION',items:providers.map(p=>['/dashboard/detectors/'+p.id,p.name,Radio])},
+ {label:'PROVIDER DETECTION',items:providers.map(p=>['/dashboard/detectors/'+p.id,p.name,Radio,p.id])},
  {label:'TRANSAKSI',items:[['/dashboard/transactions','Transaksi',ReceiptText],['/dashboard/mutations','Mutasi Masuk',ArrowLeftRight],['/dashboard/support','Tiket Pengaduan',MessageSquare]]},
  {label:'AKUN',items:[['/dashboard/developers','API & Webhook',Code2],['/dashboard/subscription','Langganan',CreditCard],['/dashboard/settings','Pengaturan',Settings],['/dashboard/banks','Rekening Bank',Building2],['/dashboard/admin','Panel Admin',ShieldCheck]]}
 ];
@@ -110,6 +114,21 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
  const loc=useLocation();
  useEffect(()=>{setMobile(false);setAccount(false)},[loc.pathname]);
  useEffect(()=>{document.documentElement.dataset.theme=p.s.theme==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p.s.theme},[p.s.theme]);
+ useEffect(()=>{
+  if(typeof window==='undefined'||window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+  const lenis=new Lenis({duration:0.9,smoothWheel:true});
+  let raf=0;
+  const tick=(time:number)=>{lenis.raf(time);raf=requestAnimationFrame(tick);};
+  raf=requestAnimationFrame(tick);
+  return()=>{cancelAnimationFrame(raf);lenis.destroy();};
+ },[]);
+ useEffect(()=>{
+  if(typeof window==='undefined'||window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+  const ctx=gsap.context(()=>{
+   gsap.fromTo('.page-head',{opacity:0,y:8},{opacity:1,y:0,duration:0.35,ease:'power2.out',clearProps:'transform'});
+  });
+  return()=>ctx.revert();
+ },[loc.pathname]);
 
  if(!authChecked)return <div className="empty" style={{minHeight:'100vh',justifyContent:'center'}}><p>Memeriksa sesi...</p></div>;
  if(!merchant)return <Navigate to="/login" replace state={{from:loc.pathname}}/>;
@@ -125,7 +144,7 @@ function Shell({p,authChecked}:{p:Props;authChecked:boolean}){
    <div className="brand"><Link to="/dashboard" className="brand-mark">D</Link><div className="brand-text"><strong>DitsGate</strong><small>Payment infrastructure</small></div><button aria-label="Tutup menu" className="icon-btn mobile-close" onClick={()=>setMobile(false)}><X size={18}/></button></div>
    <div className="sidebar-scroll">
     <div className="balance"><div className="balance-title">Saldo biaya <Wallet size={15}/></div><strong>{idr(balanceShown)}</strong>{heldBalance>0&&<small style={{display:'block',color:'var(--muted)',marginBottom:6}}>Ditahan: {idr(heldBalance)}</small>}<Link to="/dashboard/topup" className="button secondary balance-btn"><Plus size={14}/> Top Up</Link></div>
-    {visibleSections.map(group=><nav key={group.label} aria-label={group.label} className="nav-group"><div className="nav-title">{group.label}</div>{group.items.map(([path,label,Icon])=><NavLink key={path} to={path} end={path==='/dashboard'} className={({isActive})=>'nav-link '+(isActive?'active':'')} title={label}><Icon size={17}/><span>{label}</span></NavLink>)}</nav>)}
+    {visibleSections.map(group=><nav key={group.label} aria-label={group.label} className="nav-group"><div className="nav-title">{group.label}</div>{group.items.map(([path,label,Icon,providerId])=><NavLink key={path} to={path} end={path==='/dashboard'} className={({isActive})=>'nav-link '+(isActive?'active':'')} title={label}>{providerId?<ProviderIcon id={providerId} size={18}/>:<Icon size={17}/>}<span>{label}</span></NavLink>)}</nav>)}
    </div>
    <div className="sidebar-foot"><Link to="/" className="nav-link" title="Beranda publik"><ExternalLink size={17}/><span>Beranda publik</span></Link><button className="nav-link collapse-btn" onClick={()=>setCollapsed(v=>!v)} aria-label={collapsed?'Perluas sidebar':'Ciutkan sidebar'}>{collapsed?<PanelLeftOpen size={17}/>:<PanelLeftClose size={17}/>}<span>Ciutkan sidebar</span></button></div>
   </aside>
@@ -193,7 +212,6 @@ function Overview(p:Props&{open:()=>void;serverBalance:number|null}){
 
  const refresh=async()=>{
   if(!merchant?.token){setServerTx(null);setServerLedger(null);return;}
-  if(merchant.user.role==='admin'){setServerTx([]);setServerLedger([]);return;}
   const headers:Record<string,string>=merchant.token!=='cookie_session'?{Authorization:`Bearer ${merchant.token}`}:{};
   const opts={credentials:'include' as const,headers};
   try{
@@ -208,10 +226,10 @@ function Overview(p:Props&{open:()=>void;serverBalance:number|null}){
    ]);
    if(Array.isArray(txR?.data))setServerTx(txR.data.map((r:any)=>({id:r.id,orderId:r.orderId,amount:r.amount,uniqueCode:r.uniqueCode,method:'QRIS',status:r.status,createdAt:r.createdAt,expiresAt:r.expiresAt,description:'',customer:''})));
    if(Array.isArray(ledR?.data))setServerLedger(ledR.data);
-   setHasQris(Array.isArray(qR?.data)&&qR.data.length>0);
-   setHasDetector(pR?.data?.status==='connected'||lR?.data?.status==='receiving'||lR?.data?.status==='awaiting_event');
-   setHasKey(Array.isArray(kR?.data)&&kR.data.some((k:any)=>!k.revokedAt));
-   setHasWebhook(Boolean(wR?.data?.url));
+   if(qR)setHasQris(Array.isArray(qR.data)&&qR.data.length>0);
+   if(pR||lR)setHasDetector(pR?.data?.status==='connected'||lR?.data?.status==='receiving'||lR?.data?.status==='awaiting_event');
+   if(kR)setHasKey(Array.isArray(kR.data)&&kR.data.some((k:any)=>!k.revokedAt));
+   if(wR)setHasWebhook(Boolean(wR.data?.url));
   }catch{}
  };
  useEffect(()=>{void refresh();},[merchant?.token]);
@@ -237,7 +255,7 @@ function Overview(p:Props&{open:()=>void;serverBalance:number|null}){
 
  return <>
   <Head title="Dashboard" desc="Pantau aktivitas pembayaran dan integrasi merchant Anda." actions={<><button className="button secondary" onClick={()=>{void refresh();p.notify('Dashboard diperbarui')}}><RefreshCw size={15}/> Segarkan</button><select aria-label="Periode dashboard" value={period} onChange={e=>setPeriod(+e.target.value)}><option value={7}>7 hari</option><option value={30}>30 hari</option><option value={90}>90 hari</option></select></>}/>
-  <div className="kpi-grid">{stats.map(([label,value,sub,Icon])=><div className="card kpi" key={label}><div className="kpi-label">{label}<Icon size={17}/></div><strong>{value}</strong><small>{sub}</small></div>)}</div>
+  <div className="kpi-grid">{stats.map(([label,value,sub,Icon],idx)=><motion.div className="card kpi" key={label} initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} transition={{duration:0.28,delay:idx*0.05}} whileHover={{y:-2}}><div className="kpi-label">{label}<Icon size={17}/></div><strong>{value}</strong><small>{sub}</small></motion.div>)}</div>
   <div className="two-col">
    <section className="card chart-card">
     <div className="section-head"><div><h2>Volume pembayaran</h2><p>Transaksi lunas dalam {period} hari</p></div></div>
@@ -245,7 +263,7 @@ function Overview(p:Props&{open:()=>void;serverBalance:number|null}){
    </section>
    <section className="card checklist">
     <div className="section-head"><div><h2>Langkah integrasi Anda</h2><p>Selesaikan langkah berikut untuk mulai menerima pembayaran.</p></div><strong>{Math.round(steps.filter(x=>x[1]).length/4*100)}%</strong></div>
-    <div className="progress"><span style={{width:(steps.filter(x=>x[1]).length/4*100)+'%'}}/></div>
+    <div className="progress"><motion.span initial={false} animate={{width:(steps.filter(x=>x[1]).length/4*100)+'%'}} transition={{duration:0.45,ease:'easeOut'}}/></div>
     {steps.map(([name,done,path],i)=><Link to={path||'/dashboard/developers'} className="step" key={name}><span className={'step-dot '+(done?'done':'')}>{done?<Check size={14}/>:i+1}</span><span><b>{name}</b><small>{done?'Selesai':'Perlu tindakan'}</small></span><ChevronRight size={16}/></Link>)}
    </section>
   </div>
@@ -328,7 +346,7 @@ function Detectors(p:Props){
   if(listener?.status==='awaiting_event')return{label:'Menunggu sinyal',tone:'blue',detail:'Perangkat listener terpasang'};
   return{label:'Belum terhubung',tone:'muted',detail:'Pasangkan Android listener'};
  };
- return <><Head title="Detektor Pembayaran" desc="Sumber notifikasi dan pembacaan mutasi pembayaran merchant."/><div className="provider-grid">{providers.map(v=>{const st=cardStatus(v.id);return <Link className="card provider-card" to={'/dashboard/detectors/'+v.id} key={v.id}><span className="provider-icon"><Radio size={20}/></span><div><h2>{v.name}</h2><p>{st.detail}</p><Badge tone={st.tone}>{st.label}</Badge></div><ChevronRight size={17}/></Link>})}</div><div className="info-line">Shopee Partner membaca mutasi langsung dari portal; GoPay, BCA, LinkAja, BRI, Mandiri, dan Aplikasi Listener menerima sinyal notifikasi dari Android Listener.</div></>;
+ return <><Head title="Detektor Pembayaran" desc="Sumber notifikasi dan pembacaan mutasi pembayaran merchant."/><div className="provider-grid">{providers.map((v,idx)=>{const st=cardStatus(v.id);return <motion.div key={v.id} initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{duration:0.25,delay:idx*0.04}} whileHover={{y:-2}}><Link className="card provider-card" to={'/dashboard/detectors/'+v.id}><span className="provider-icon" style={{background:'transparent',padding:0}}><ProviderIcon id={v.id} size={34}/></span><div><h2>{v.name}</h2><p>{st.detail}</p><Badge tone={st.tone}>{st.label}</Badge></div><ChevronRight size={17}/></Link></motion.div>})}</div><div className="info-line">Shopee Partner membaca mutasi langsung dari portal; GoPay, BCA, LinkAja, BRI, Mandiri, dan Aplikasi Listener menerima sinyal notifikasi dari Android Listener.</div></>;
 }
 
 function Mutations(p:Props){
