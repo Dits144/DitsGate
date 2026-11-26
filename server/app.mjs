@@ -181,7 +181,67 @@ export async function bootstrapAdmin(db,{email=process.env.DITSGATE_ADMIN_EMAIL,
 const digits=(v)=>typeof v==='string'&&/^[0-9]{6,20}$/.test(v);
 const bankShape=(r)=>({id:r.id,bank:r.bank,holder:r.holder,numberMasked:'\u2022\u2022\u2022\u2022 '+r.number.slice(-4),isDefault:!!r.is_default,status:'unverified',createdAt:r.created_at});
 const assetShape=(r)=>({id:r.id,payload:r.payload,provider:r.provider,name:r.name,city:r.city,mode:r.mode,isDefault:!!r.is_default,createdAt:r.created_at});
-const txShape=(r)=>({id:r.id,orderId:r.order_id,amount:r.amount,uniqueCode:r.unique_code,total:r.amount+r.unique_code,qrisId:r.qris_id,status:r.status,createdAt:r.created_at,expiresAt:r.expires_at});
+const txShape=(r,qrisPayload=undefined)=>({id:r.id,orderId:r.order_id,amount:r.amount,uniqueCode:r.unique_code,total:r.amount+r.unique_code,qrisId:r.qris_id,status:r.status,createdAt:r.created_at,expiresAt:r.expires_at,...(qrisPayload?{qrisPayload}:{})});
+function buildDynamicQris(raw,amount,mode='dynamic'){
+ const tags=parseEmv(raw);
+ if(mode==='static')return raw.trim();
+ const flag=mode==='compatible'?'11':'12';
+ const out=tags.filter(t=>t.tag!=='63').map(t=>({...t}));
+ const i=out.findIndex(t=>t.tag==='01');
+ if(i>=0)out[i]={tag:'01',value:flag};else out.splice(1,0,{tag:'01',value:flag});
+ const ex=out.findIndex(t=>t.tag==='54');
+ if(ex>=0)out.splice(ex,1);
+ const cur=out.findIndex(t=>t.tag==='53');
+ out.splice(cur<0?out.length:cur+1,0,{tag:'54',value:String(amount)});
+ const body=out.map(t=>`${t.tag}${String(t.value.length).padStart(2,'0')}${t.value}`).join('')+'6304';
+ let crc=0xffff;
+ for(const byte of Buffer.from(body,'utf8')){crc^=byte<<8;for(let n=0;n<8;n++)crc=(crc&0x8000)?((crc<<1)^0x1021)&0xffff:(crc<<1)&0xffff}
+ return body+crc.toString(16).toUpperCase().padStart(4,'0');
+}
+export async function syncMerchantTransactions(db,{shopeePortalFetch=globalThis.fetch,shopeePortalKey=process.env.DITSGATE_PORTAL_ENCRYPTION_KEY,webhookFetch=globalThis.fetch}={}){
+ const keyBuf=portalKey(shopeePortalKey);
+ if(!keyBuf||keyBuf.length!==32)return {checked:0,matched:0};
+ const pendingUsers=db.prepare("SELECT DISTINCT user_id FROM transactions WHERE status='pending'").all();
+ let checked=0,matched=0;
+ for(const {user_id:uid} of pendingUsers){
+  expireOverdueTransactions(db,uid);
+  const txs=db.prepare("SELECT * FROM transactions WHERE user_id=? AND status='pending' ORDER BY created_at ASC").all(uid);
+  if(!txs.length)continue;
+  const conn=db.prepare("SELECT * FROM shopee_portal_connections WHERE user_id=? AND status='connected'").get(uid);
+  if(!conn)continue;
+  checked++;
+  let token;
+  try{token=decryptPortalToken(keyBuf,conn.token_enc)}catch{continue}
+  let rows;
+  try{rows=await readShopeePortalFeed({fetchImpl:shopeePortalFetch,token,merchantId:conn.merchant_id,storeId:conn.store_id})}catch{continue}
+  const settled=[];
+  db.transaction(()=>{
+   for(const tx of txs){
+    const expected=tx.amount+(tx.unique_code??0);
+    const minMs=Date.parse(tx.created_at)-120_000;
+    const maxMs=Date.parse(tx.expires_at);
+    const hit=rows.find(r=>{
+     if(r.amountIdr!==expected)return false;
+     if(r.createdAt){const ms=Date.parse(r.createdAt);if(Number.isFinite(ms)&&(ms<minMs||ms>maxMs))return false}
+     return true;
+    });
+    if(!hit)continue;
+    settleTxInTx(db,tx,'paid',uid);
+    matched++;
+    settled.push(tx);
+   }
+  })();
+  for(const tx of settled){
+   const keyHook=db.prepare("SELECT webhook_url FROM merchant_api_keys WHERE user_id=? AND qris_id=? AND revoked_at IS NULL AND webhook_url IS NOT NULL ORDER BY created_at DESC LIMIT 1").get(uid,tx.qris_id);
+   const acctHook=db.prepare('SELECT url FROM merchant_webhook_settings WHERE user_id=?').get(uid);
+   const dest=keyHook?.webhook_url||acctHook?.url;
+   if(dest){
+    void deliverWebhook({url:dest,secret:null,fetchImpl:webhookFetch,payload:{event:'payment.paid',transaction_id:tx.id,order_id:tx.order_id,amount:tx.amount,unique_code:tx.unique_code,total_amount:tx.amount+tx.unique_code,status:'paid',paid_at:now()}}).catch(()=>{});
+   }
+  }
+ }
+ return {checked,matched};
+}
 function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.length>4096)throw fail(400,'String QRIS EMVCo tidak valid.');let offset=0,tags=[],seen=new Set;while(offset<raw.length){if(offset+4>raw.length)throw fail(400,'Tag QRIS terpotong.');const tag=raw.slice(offset,offset+2),len=Number(raw.slice(offset+2,offset+4));if(!/^\d\d$/.test(tag)||!/^\d\d$/.test(raw.slice(offset+2,offset+4))||seen.has(tag)||offset+4+len>raw.length)throw fail(400,'Tag QRIS tidak valid.');seen.add(tag);tags.push({tag,value:raw.slice(offset+4,offset+4+len)});offset+=4+len}if(tags.at(-1)?.tag!=='63'||tags.at(-1).value.length!==4)throw fail(400,'Checksum QRIS tidak ditemukan.');let crc=0xffff;for(const byte of Buffer.from(raw.slice(0,-4),'utf8')){crc^=byte<<8;for(let i=0;i<8;i++)crc=(crc&0x8000)?((crc<<1)^0x1021)&0xffff:(crc<<1)&0xffff}if(crc.toString(16).toUpperCase().padStart(4,'0')!==tags.at(-1).value.toUpperCase())throw fail(400,'Checksum QRIS salah.');return tags}
  export function createApp({db=openDatabase(process.env.DITSGATE_DB||'data/ditsgate.sqlite'),allowOrigin='http://127.0.0.1:5179',webhookSecret=process.env.QRISGATE_WEBHOOK_SECRET,shopeePortalFetch=globalThis.fetch,shopeePortalKey=process.env.DITSGATE_PORTAL_ENCRYPTION_KEY}={}){
  const allowedOrigins=new Set(String(allowOrigin||'').split(',').map(s=>s.trim()).filter(Boolean));
@@ -234,7 +294,7 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
  if(path==='/api/auth/register'&&method==='POST'){checkRate('reg:'+req.socket.remoteAddress,5,60_000);const input=await body(req);const email=String(input.email||'').trim().toLowerCase(),password=input.password,name=String(input.name||'').trim();if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)||typeof password!=='string'||password.length<12||password.length>256||name.length<2||name.length>100)throw fail(400,'Nama, email, atau password (minimal 12 karakter) tidak valid.');if(process.env.DITSGATE_ADMIN_EMAIL?.trim().toLowerCase()===email)throw fail(403,'Email ini dicadangkan untuk bootstrap administratif.');const id=randomUUID(),pwHash=await passwordHash(password),stamp=now();try{db.transaction(()=>{db.prepare("INSERT INTO users (id,email,password_hash,name,created_at,role) VALUES (?,?,?,?,?,'merchant')").run(id,email,pwHash,name,stamp);db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),id,SIGNUP_BONUS,'signup_bonus',id,null,'Bonus saldo awal pendaftaran',stamp)})()}catch(e){if(e.code==='ERR_SQLITE_ERROR')throw fail(409,'Email sudah terdaftar.');throw e}return send(res,201,{id,email,name,balance:SIGNUP_BONUS})}
  if(path==='/api/auth/login'&&method==='POST'){checkRate('login:'+req.socket.remoteAddress,10,60_000);const input=await body(req),email=String(input.email||'').trim().toLowerCase();const user=db.prepare('SELECT * FROM users WHERE email=?').get(email);if(!user||typeof input.password!=='string'||!(await verifyPassword(input.password,user.password_hash)))throw fail(401,'Email atau password salah.');if(user.is_active===0)throw fail(403,'Akun Anda sedang dinonaktifkan oleh admin.');const token=randomBytes(32).toString('base64url');db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(hash(token),user.id,Date.now()+86_400_000);const isHttps=req.headers['x-forwarded-proto']==='https'||req.socket.encrypted;return send(res,200,{token,expiresIn:86400,user:{id:user.id,email:user.email,name:user.name,role:user.role}},{'set-cookie':`ditsgate_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400${isHttps?'; Secure':''}`})}
  const token=bearer(req),session=token&&db.prepare('SELECT user_id FROM sessions WHERE token_hash=? AND expires_at>?').get(hash(token),Date.now());
- const keyAccess=!session&&token?.startsWith('dg_test_')&&/^\/api\/v1\/transactions$/.test(path)&&['GET','POST'].includes(method);
+ const keyAccess=!session&&token?.startsWith('dg_test_')&&((path==='/api/v1/transactions'&&['GET','POST'].includes(method))||(/^\/api\/v1\/transactions\/[^/]+$/.test(path)&&method==='GET'));
  const apiKey=keyAccess&&db.prepare('SELECT * FROM merchant_api_keys WHERE key_hash=? AND revoked_at IS NULL').get(hash(token));
  if(!session&&!apiKey)throw fail(401,'Autentikasi diperlukan.');
  const owner=session?.user_id??apiKey.user_id;
@@ -714,17 +774,37 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
   const asset=selectedId?db.prepare('SELECT * FROM qris_assets WHERE id=? AND user_id=?').get(selectedId,owner):db.prepare('SELECT * FROM qris_assets WHERE user_id=? AND is_default=1').get(owner);
   if(!asset)throw fail(400,'Kartu QRIS milik akun belum tersedia.');
   if(apiKey?.qris_id&&asset.id!==apiKey.qris_id)throw fail(403,'Kunci dibatasi ke QRIS terpilih.');
-  const id=randomUUID(),unique=0,orderId=x.order_id.trim(),stamp=now(),expiresAt=new Date(Date.now()+expMins*60_000).toISOString();
+  const id=randomUUID(),orderId=x.order_id.trim(),stamp=now(),expiresAt=new Date(Date.now()+expMins*60_000).toISOString();
+  let unique=0;
+  if(x.use_unique_code===true){
+   const used=new Set(db.prepare("SELECT amount+unique_code AS tot FROM transactions WHERE user_id=? AND status='pending'").all(owner).map(r=>r.tot));
+   for(let c=1;c<=99;c++){
+    if(!used.has(x.amount+c)){unique=c;break}
+   }
+   if(!unique)unique=1+Math.floor(Math.random()*99);
+  }
+  const qrisPayload=buildDynamicQris(asset.payload,x.amount+unique,asset.mode);
   try{
    const result=db.transaction(()=>{
     expireOverdueInTx(db,owner);
     if(balanceOf(db,owner)<TX_FEE)throw fail(409,`Saldo biaya tidak mencukupi (minimal Rp ${TX_FEE} ditahan untuk membuat transaksi).`);
     db.prepare('INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?)').run(id,owner,orderId,x.amount,unique,asset.id,'pending',stamp,expiresAt);
     db.prepare('INSERT INTO ledger_entries (id,user_id,amount,kind,source_id,actor_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),owner,-TX_FEE,'tx_hold',id,owner,`Saldo ditahan untuk transaksi · ${orderId}`,stamp);
-    return {data:txShape(db.prepare('SELECT * FROM transactions WHERE id=?').get(id)),balance:balanceOf(db,owner),heldBalance:heldBalanceOf(db,owner),feeHeld:TX_FEE};
+    return {data:txShape(db.prepare('SELECT * FROM transactions WHERE id=?').get(id),qrisPayload),balance:balanceOf(db,owner),heldBalance:heldBalanceOf(db,owner),feeHeld:TX_FEE};
    })();
    return send(res,201,result);
   }catch(e){if(e.code==='ERR_SQLITE_ERROR')throw fail(409,'Order ID sudah digunakan.');throw e}
+ }
+ const txLookup=/^\/api\/v1\/transactions\/([^/]+)$/.exec(path)?.[1];
+ if(txLookup&&method==='GET'){
+  expireOverdueTransactions(db,owner);
+  const ref=decodeURIComponent(txLookup);
+  const tx=db.prepare('SELECT * FROM transactions WHERE (id=? OR order_id=?) AND user_id=?').get(ref,ref,owner);
+  if(!tx)throw fail(404,'Transaksi tidak ditemukan.');
+  if(apiKey?.qris_id&&tx.qris_id!==apiKey.qris_id)throw fail(403,'Kunci dibatasi ke QRIS terpilih.');
+  const asset=db.prepare('SELECT * FROM qris_assets WHERE id=?').get(tx.qris_id);
+  const qrisPayload=asset?buildDynamicQris(asset.payload,tx.amount+tx.unique_code,asset.mode):undefined;
+  return send(res,200,{data:txShape(tx,qrisPayload)});
  }
  const merchantTxId=/^\/api\/v1\/transactions\/([a-f0-9-]{36})$/.exec(path)?.[1];
  if(merchantTxId&&method==='PATCH'){
