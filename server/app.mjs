@@ -64,8 +64,12 @@ export async function checkAllPortalConnections(db, { shopeePortalFetch = global
    db.prepare("UPDATE shopee_portal_connections SET status='connected',last_checked_at=?,last_error=NULL,transaction_count=? WHERE user_id=? AND token_enc=?").run(now(), rows.length, conn.user_id, conn.token_enc);
   } catch (e) {
    if (e instanceof PortalError) {
-    markPortalBrokenAndNotify(db, conn.user_id, e.message, conn.token_enc);
-    broken++;
+    if (e.transient) {
+     db.prepare("UPDATE shopee_portal_connections SET last_checked_at=?,last_error=? WHERE user_id=? AND token_enc=?").run(now(), e.message, conn.user_id, conn.token_enc);
+    } else {
+     markPortalBrokenAndNotify(db, conn.user_id, e.message, conn.token_enc);
+     broken++;
+    }
    }
   }
  }
@@ -96,6 +100,10 @@ export async function syncAdminShopeeTopups(db,{shopeePortalFetch=globalThis.fet
   db.prepare("UPDATE shopee_portal_connections SET status='connected',last_checked_at=?,last_error=NULL,transaction_count=? WHERE user_id=? AND token_enc=?").run(now(),rows.length,conn.user_id,conn.token_enc);
  }catch(e){
   if(e instanceof PortalError){
+   if(e.transient){
+    db.prepare("UPDATE shopee_portal_connections SET last_checked_at=?,last_error=? WHERE user_id=? AND token_enc=?").run(now(),e.message,conn.user_id,conn.token_enc);
+    throw fail(e.status,e.message);
+   }
    markPortalBrokenAndNotify(db,conn.user_id,e.message,conn.token_enc);
    throw fail(e.status,e.message);
   }
@@ -383,6 +391,11 @@ function parseEmv(raw){if(typeof raw!=='string'||!raw.startsWith('000201')||raw.
       return send(res,200,{data:rows});
     }catch(e){
       if(e instanceof PortalError){
+        if(e.transient){
+          const changed=db.prepare("UPDATE shopee_portal_connections SET last_checked_at=?,last_error=? WHERE user_id=? AND token_enc=?").run(now(),e.message,owner,connection.token_enc);
+          if(!changed.changes)throw fail(409,'Koneksi portal berubah selama pembacaan mutasi. Segarkan kembali.');
+          throw fail(e.status,e.message);
+        }
         const changes=markPortalBrokenAndNotify(db,owner,e.message,connection.token_enc);
         if(!changes)throw fail(409,'Koneksi portal berubah selama pembacaan mutasi. Segarkan kembali.');
         throw fail(e.status,e.message);

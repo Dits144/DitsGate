@@ -10,15 +10,17 @@ const PORTAL_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) G
 const TOKEN_WINDOW_SECONDS = 7 * 86_400;
 
 export class PortalError extends Error {
-  constructor(status, message) {
+  constructor(status, message, transient = false) {
     super(message);
     this.name = 'PortalError';
     this.status = status;
+    this.transient = transient;
   }
 }
 
-const invalidConfig = message => new PortalError(400, message);
-const providerFailure = message => new PortalError(502, message);
+const invalidConfig = message => new PortalError(400, message, false);
+const providerFailure = message => new PortalError(502, message, false);
+const transientFailure = message => new PortalError(502, message, true);
 
 function scopeText(value) {
   if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
@@ -70,30 +72,43 @@ export function decryptPortalToken(key, blob) {
 }
 
 async function portalRequest(fetchImpl, path, token, inner) {
-  if (typeof fetchImpl !== 'function') throw new PortalError(503, 'Transport portal Shopee tidak tersedia.');
+  if (typeof fetchImpl !== 'function') throw new PortalError(503, 'Transport portal Shopee tidak tersedia.', true);
   const body = JSON.stringify({ data: { metadata: { token, language: 'id', timezone: 'Asia/Jakarta' }, ...inner } });
   let response;
-  try {
-    response = await fetchImpl(PORTAL_BASE + path, {
-      method: 'POST',
-      redirect: 'error',
-      signal: AbortSignal.timeout(10_000),
-      headers: {
-        accept: 'application/json',
-        'accept-language': 'id,en-US;q=0.9,en;q=0.8',
-        'content-type': 'application/json',
-        origin: PORTAL_ORIGIN,
-        referer: PORTAL_ORIGIN + '/',
-        'user-agent': PORTAL_USER_AGENT,
-        'x-timestamp-ms': String(Date.now()),
-        'x-token': '',
-      },
-      body,
-    });
-  } catch {
-    throw providerFailure('Portal Shopee tidak dapat dijangkau.');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      response = await fetchImpl(PORTAL_BASE + path, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(15_000),
+        headers: {
+          accept: 'application/json',
+          'accept-language': 'id,en-US;q=0.9,en;q=0.8',
+          'content-type': 'application/json',
+          origin: PORTAL_ORIGIN,
+          referer: PORTAL_ORIGIN + '/',
+          'user-agent': PORTAL_USER_AGENT,
+          'x-timestamp-ms': String(Date.now()),
+          'x-token': '',
+        },
+        body,
+      });
+      if (response && response.status >= 500 && attempt === 0) {
+        await new Promise(r => setTimeout(r, 600));
+        continue;
+      }
+      break;
+    } catch {
+      if (attempt === 0) {
+        await new Promise(r => setTimeout(r, 600));
+        continue;
+      }
+      throw transientFailure('Portal Shopee tidak dapat dijangkau.');
+    }
   }
-  if (!response || response.ok !== true || (response.url && response.url !== PORTAL_BASE + path) || response.redirected === true) throw providerFailure('Portal Shopee menolak permintaan.');
+  if (!response) throw transientFailure('Portal Shopee tidak dapat dijangkau.');
+  if (response.status >= 500) throw transientFailure(`Portal Shopee sedang gangguan (${response.status}).`);
+  if (response.ok !== true || (response.url && response.url !== PORTAL_BASE + path) || response.redirected === true) throw providerFailure('Portal Shopee menolak permintaan.');
   let payload;
   try {
     const raw = await response.text();
