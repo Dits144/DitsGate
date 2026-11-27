@@ -24,7 +24,7 @@ const getAdminPortalConnection=(db)=>db.prepare("SELECT c.* FROM shopee_portal_c
 
 function markPortalBrokenAndNotify(db, userId, lastError, tokenEnc = null) {
  const stamp = now();
- const existing = db.prepare('SELECT token_enc, broken_notified_at FROM shopee_portal_connections WHERE user_id=?').get(userId);
+ const existing = db.prepare('SELECT token_enc, broken_notified_at, last_checked_at FROM shopee_portal_connections WHERE user_id=?').get(userId);
  if (!existing) return 0;
  if (tokenEnc !== null && existing.token_enc !== tokenEnc) return 0;
  const sql = tokenEnc !== null
@@ -36,7 +36,7 @@ function markPortalBrokenAndNotify(db, userId, lastError, tokenEnc = null) {
   db.prepare('UPDATE shopee_portal_connections SET broken_notified_at=? WHERE user_id=? AND broken_notified_at IS NULL').run(stamp, userId);
   const user = db.prepare('SELECT email, name FROM users WHERE id=?').get(userId);
   if (user?.email) {
-   void notifyPortalBroken({ to: user.email, name: user.name, lastError }).catch(() => {});
+   void notifyPortalBroken({ to: user.email, name: user.name, lastError, lastCheckedAt: existing.last_checked_at || stamp }).catch(() => {});
   }
  }
  return res.changes;
